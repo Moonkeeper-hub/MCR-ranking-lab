@@ -1,5 +1,0 @@
-streamlit>=1.39
-pandas>=2.2
-plotly>=5.24
-pytest>=8.3
-trueskill>=0.4.5
