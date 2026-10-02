@@ -1,0 +1,1 @@
+{"root":["./src/main.ts","./src/data/csv.ts","./src/engine/evolution.ts","./src/engine/legacy.ts","./src/engine/legacyTables.ts","./src/engine/types.ts"],"version":"5.8.3"}
