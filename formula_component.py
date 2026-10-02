@@ -11,10 +11,18 @@ _formula_picker = components.declare_component(
 )
 
 
-def formula_picker(formula_id: str, selected: str | None = None, key: str | None = None):
+def formula_picker(
+    formula_id: str,
+    selected: str | None = None,
+    eu_weight: float | None = None,
+    t5_weight: float | None = None,
+    key: str | None = None,
+):
     return _formula_picker(
         formula_id=formula_id,
         selected=selected,
+        eu_weight=eu_weight,
+        t5_weight=t5_weight,
         default=selected,
         key=key,
     )

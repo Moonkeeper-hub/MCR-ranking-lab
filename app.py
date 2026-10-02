@@ -45,6 +45,7 @@ def set_param(formula_id, key, value):
 
 def reset_formula(formula_id):
     st.session_state[state_key(formula_id)] = FORMULAS[formula_id].defaults().copy()
+    _clear_formula_widget_state(formula_id)
 
 
 def get_spec(formula_id, key):
@@ -54,22 +55,79 @@ def get_spec(formula_id, key):
     return None
 
 
+def _sync_legacy_weight_widgets(changed_key, changed_widget_key):
+    """Keep EU/T5 weights complementary in every visible control."""
+    value = round(float(st.session_state[changed_widget_key]), 2)
+    value = min(1.0, max(0.0, value))
+    other_key = "t5_weight" if changed_key == "eu_weight" else "eu_weight"
+    other_value = round(1.0 - value, 2)
+
+    params = ensure_formula_state("legacy")
+    params[changed_key] = value
+    params[other_key] = other_value
+
+    # The same parameter can be rendered in the sidebar and in the formula card.
+    # Update any already-created counterpart widget so both sliders visibly mirror.
+    for prefix in ("sidebar", "formula_card"):
+        own_widget = f"{prefix}::legacy::{changed_key}"
+        other_widget = f"{prefix}::legacy::{other_key}"
+        if own_widget in st.session_state and own_widget != changed_widget_key:
+            st.session_state[own_widget] = value
+        if other_widget in st.session_state:
+            st.session_state[other_widget] = other_value
+
+
+def _clear_formula_widget_state(formula_id):
+    prefixes = ("sidebar", "formula_card")
+    for spec in FORMULAS[formula_id].parameters:
+        for prefix in prefixes:
+            st.session_state.pop(f"{prefix}::{formula_id}::{spec.key}", None)
+
+
 def render_control(formula_id, spec, prefix, compact=False):
     value = get_param(formula_id, spec.key)
     widget_key = f"{prefix}::{formula_id}::{spec.key}"
 
+    # If another mirrored control changed the canonical value, seed this widget
+    # with that value before rendering it.
+    if widget_key in st.session_state and st.session_state[widget_key] != value:
+        st.session_state[widget_key] = value
+
+    callback = None
+    callback_args = ()
+    if formula_id == "legacy" and spec.key in ("eu_weight", "t5_weight"):
+        callback = _sync_legacy_weight_widgets
+        callback_args = (spec.key, widget_key)
+
+    common = {
+        "key": widget_key,
+    }
+    if callback:
+        common["on_change"] = callback
+        common["args"] = callback_args
+
     if spec.control == "slider":
-        new = st.slider(spec.label, spec.min_value, spec.max_value, value, spec.step, key=widget_key)
+        new = st.slider(
+            spec.label, spec.min_value, spec.max_value, value, spec.step, **common
+        )
     elif spec.control == "number":
-        new = st.number_input(spec.label, spec.min_value, spec.max_value, value, spec.step, key=widget_key)
+        new = st.number_input(
+            spec.label, spec.min_value, spec.max_value, value, spec.step, **common
+        )
     elif spec.control == "select_slider":
-        new = st.select_slider(spec.label, options=spec.options, value=value, key=widget_key)
+        new = st.select_slider(spec.label, options=spec.options, value=value, **common)
     elif spec.control == "checkbox":
-        new = st.checkbox(spec.label, value=bool(value), key=widget_key)
+        new = st.checkbox(spec.label, value=bool(value), **common)
     else:
         new = value
 
     set_param(formula_id, spec.key, new)
+
+    # Defensive invariant even if a value arrives from a future non-UI source.
+    if formula_id == "legacy" and spec.key in ("eu_weight", "t5_weight"):
+        other_key = "t5_weight" if spec.key == "eu_weight" else "eu_weight"
+        set_param(formula_id, other_key, round(1.0 - float(new), 2))
+
     return new
 
 
@@ -130,6 +188,11 @@ for group in dict.fromkeys(p.group for p in current_def.parameters):
     with st.sidebar.expander(group, expanded=(group in ["Итоговый рейтинг", "TrueSkill"])):
         for spec in [p for p in current_def.parameters if p.group == group]:
             render_control(current_formula_id, spec, "sidebar")
+        if current_formula_id == "legacy" and group == "Итоговый рейтинг":
+            st.caption(
+                f"Σ весов = {get_param('legacy', 'eu_weight') + get_param('legacy', 't5_weight'):.2f} "
+                "— изменение одного веса автоматически меняет второй."
+            )
 
 st.sidebar.divider()
 st.sidebar.subheader("Данные")
@@ -166,6 +229,8 @@ def formula_panel(formula_id: str):
     clicked = formula_picker(
         formula_id=formula_id,
         selected=selected_before,
+        eu_weight=get_param(formula_id, "eu_weight") if formula_id == "legacy" else None,
+        t5_weight=get_param(formula_id, "t5_weight") if formula_id == "legacy" else None,
         key=f"formula-picker::{formula_id}",
     )
 

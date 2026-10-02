@@ -96,14 +96,20 @@ function token(label, key, extraClass="") {
   return `<span class="var ${selected === key ? "selected" : ""} ${extraClass}" data-key="${key}">${label}</span>`;
 }
 
+function fmtWeight(value, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return n.toFixed(2).replace(".", ",");
+}
+
 function legacyHtml() {
   return `
     <div class="box">
       <div class="caption">Основная формула расчёта рейтинга</div>
       <div class="formula">
         ${token("Рейтинг","Rating")} =
-        0,25 · ${token("ЭУ","EU")} +
-        0,75 · ${token("T5","T5")}
+        ${token(fmtWeight(currentArgs.eu_weight, "0,25"),"wEU")} · ${token("ЭУ","EU")} +
+        ${token(fmtWeight(currentArgs.t5_weight, "0,75"),"wT5")} · ${token("T5","T5")}
       </div>
 
       <div class="caption">Турнирный показатель и T5</div>

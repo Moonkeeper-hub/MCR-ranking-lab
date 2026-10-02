@@ -7,6 +7,7 @@ import pandas as pd
 
 from .base import CalculationResult
 from .evolution import EvolutionEngine, EvolutionState, level_label, to_date
+from .legacy_tables import KT_PARTICIPANTS, LEGACY_AGE_WEIGHTS
 
 
 
@@ -39,6 +40,13 @@ class LegacyConfig:
 
     # Технические допущения
     cap_player_count_component: bool = True
+
+
+def __post_init__(self):
+    if abs((self.eu_weight + self.t5_weight) - 1.0) > 1e-9:
+        raise ValueError(
+            "Legacy weights must satisfy eu_weight + t5_weight = 1.0"
+        )
 
 
 class LegacyFormula:
