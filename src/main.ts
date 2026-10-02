@@ -1,5 +1,7 @@
 
 import "./styles.css";
+import "katex/dist/katex.min.css";
+import { renderLegacyMath } from "./ui/formulas";
 import { LegacyEngine, defaultLegacyConfig } from "./engine/legacy";
 import {
   KT_PARTICIPANTS,
@@ -56,6 +58,7 @@ function recalc(): void {
     current = new LegacyEngine(currentConfig, overrides).calculate(players, results, evaluationDate);
     reference = new LegacyEngine(defaultLegacyConfig()).calculate(players, results, evaluationDate);
     syncAllControlValues();
+    renderFormulaMath();
     renderOutput();
     setStatus(`Рассчитано локально: ${players.length} игроков, ${results.length} результатов`, true);
   } catch (error) {
@@ -162,18 +165,13 @@ function syncAllControlValues(): void {
   if (topN) topN.textContent = String(currentConfig.topN);
 }
 
-function formulaToken(label: string, token: string, live?: string): string {
-  return `<button class="formula-token ${activeFormulaToken === token ? "selected" : ""}"
-      data-formula-token="${token}" type="button"${live ? ` data-live="${live}"` : ""}>${label}</button>`;
-}
-
 function renderShell(): void {
   app.innerHTML = `
     <div class="app">
       <header class="topbar">
         <div>
           <h1>MCR Rating Lab</h1>
-          <div class="subtitle">v0.21 · TypeScript · расчёт выполняется в браузере</div>
+          <div class="subtitle">v0.22 · TypeScript · расчёт выполняется в браузере</div>
         </div>
         <div class="privacy-pill">CSV остаются на устройстве пользователя</div>
       </header>
@@ -253,47 +251,21 @@ function renderShell(): void {
 
         <main class="main">
           <section class="formula-card">
-            <div class="eyebrow">Legacy</div>
-            <div class="formula-caption">Основная формула расчёта рейтинга</div>
-            <div class="formula">
-              ${formulaToken(currentConfig.euWeight.toFixed(2), "wEU", "euWeight")} · ${formulaToken("EU", "EU")}
-              + ${formulaToken(currentConfig.t5Weight.toFixed(2), "wT5", "t5Weight")} · ${formulaToken("T5", "T5")}
+            <div class="eyebrow-row">
+              <div>
+                <div class="eyebrow">Legacy</div>
+                <div class="formula-caption">Основная формула и её компоненты</div>
+              </div>
+              <div class="formula-badge">интерактивная формула</div>
             </div>
 
-            <div class="formula-caption">Турнирный показатель и T5</div>
-            <div class="formula">
-              ${formulaToken("NRKTVT", "X")} =
-              ${formulaToken("NR", "NR")} · ${formulaToken("KT", "KT")} · ${formulaToken("VT", "VT")}
-              <span class="formula-gap"></span>
-              ${formulaToken("T5", "T5")} =
-              (Σ <span data-live="topN">${currentConfig.topN}</span> лучших ${formulaToken("NRKTVT", "X")}) /
-              <span data-live="topN">${currentConfig.topN}</span>
+            <div id="legacyFormulaMount" class="legacy-formula-mount">
+              ${renderLegacyMath(currentConfig)}
             </div>
 
-            <div class="formula-caption">Норморейтинг</div>
-            <div class="formula">
-              ${formulaToken("NR", "NR")} =
-              1000 · (${formulaToken("ЧУТ", "N")} − ${formulaToken("Место", "place")}) /
-              (${formulaToken("ЧУТ", "N")} − 1)
+            <div class="formula-hint">
+              Нажмите на коэффициент или обозначение в формуле — пояснение и связанные настройки откроются ниже.
             </div>
-
-            <div class="formula-caption">Коэффициент турнира</div>
-            <div class="formula">
-              ${formulaToken("KT", "KT")} =
-              ${formulaToken("KT", "KT_S")}<sub>ЧС</sub> +
-              ${formulaToken("KT", "KT_N")}<sub>ЧУТ</sub> +
-              ${formulaToken("KT", "KT_EU")}<sub>EU</sub> +
-              ${formulaToken("KT", "KT_W")}<sub>W</sub>
-            </div>
-
-            <div class="formula-caption">Выполнение нормы EU</div>
-            <div class="formula">
-              ${formulaToken("NR", "NR")} · ${formulaToken("KT", "KT")} ≥ ${formulaToken("EU", "EU")}
-              &nbsp;→&nbsp; ${formulaToken("успехи / неуспехи", "marks")}
-              &nbsp;·&nbsp; ${formulaToken("Double Strike", "DoubleStrike")}
-            </div>
-
-            <div class="formula-hint">Нажмите на обозначение — связанный параметр откроется прямо здесь.</div>
             <div id="formulaInspector" class="formula-inspector"></div>
           </section>
 
@@ -357,18 +329,38 @@ function renderShell(): void {
 }
 
 function bindFormulaTokens(): void {
-  document.querySelectorAll<HTMLButtonElement>("[data-formula-token]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const token = button.dataset.formulaToken!;
+  document.querySelectorAll<HTMLElement>("[data-formula-token]").forEach((element) => {
+    element.addEventListener("click", () => {
+      const token = element.dataset.formulaToken!;
       activeFormulaToken = activeFormulaToken === token ? null : token;
-      document.querySelectorAll("[data-formula-token]").forEach((el) => el.classList.remove("selected"));
+
+      document
+        .querySelectorAll<HTMLElement>("[data-formula-token]")
+        .forEach((el) => el.classList.remove("selected"));
+
       if (activeFormulaToken) {
-        document.querySelectorAll(`[data-formula-token="${activeFormulaToken}"]`)
+        document
+          .querySelectorAll<HTMLElement>(`[data-formula-token="${activeFormulaToken}"]`)
           .forEach((el) => el.classList.add("selected"));
       }
+
       renderFormulaInspector();
     });
   });
+}
+
+function renderFormulaMath(): void {
+  const mount = document.querySelector<HTMLDivElement>("#legacyFormulaMount");
+  if (!mount) return;
+
+  mount.innerHTML = renderLegacyMath(currentConfig);
+  bindFormulaTokens();
+
+  if (activeFormulaToken) {
+    mount
+      .querySelectorAll<HTMLElement>(`[data-formula-token="${activeFormulaToken}"]`)
+      .forEach((el) => el.classList.add("selected"));
+  }
 }
 
 const TOKEN_HELP: Record<string, { title: string; text: string; controls?: (keyof typeof CONTROL_DEFS)[]; action?: string }> = {
@@ -381,6 +373,31 @@ const TOKEN_HELP: Record<string, { title: string; text: string; controls?: (keyo
     title: "Вес T5",
     text: "Доля турнирного показателя T5. Вес EU автоматически дополняет его до 1.",
     controls: ["t5Weight"],
+  },
+  topN: {
+    title: "Число лучших турниров",
+    text: "Количество лучших взвешенных турнирных результатов, входящих в T5/TN.",
+    controls: ["topN"],
+  },
+  sessionCoef: {
+    title: "Коэффициент сессии",
+    text: "Вес одной игровой сессии в компоненте KT_ЧС.",
+    controls: ["sessionCoef"],
+  },
+  euNormalizer: {
+    title: "Нормализатор EU",
+    text: "Делитель среднего EU участников при расчёте компонента KT_EU.",
+    controls: ["euNormalizer"],
+  },
+  euRoundStep: {
+    title: "Шаг округления KT_EU",
+    text: "Шаг округления вниз компонента среднего EU.",
+    controls: ["euRoundStep"],
+  },
+  euComponentScale: {
+    title: "Масштаб KT_EU",
+    text: "Экспериментальный множитель компонента среднего EU участников.",
+    controls: ["euComponentScale"],
   },
   T5: {
     title: "T5",
@@ -436,6 +453,11 @@ const TOKEN_HELP: Record<string, { title: string; text: string; controls?: (keyo
     title: "EU и уровни",
     text: "Текущее EU игрока определяет кю/дан и участвует как в итоговом рейтинге, так и в проверке турнирной нормы.",
     controls: ["danStep", "confirmationMonths", "protectedEu"],
+  },
+  EUbar: {
+    title: "Средний EU участников",
+    text: "Среднее EU участников турнира, используемое в компоненте KT_EU.",
+    controls: ["euComponentScale", "euNormalizer", "euRoundStep"],
   },
   marks: {
     title: "Успехи / неуспехи",

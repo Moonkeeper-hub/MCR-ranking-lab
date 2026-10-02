@@ -1,6 +1,6 @@
 {
   "name": "mcr-rating-lab",
-  "version": "0.20.0",
+  "version": "0.22.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,5 +11,8 @@
   "devDependencies": {
     "typescript": "^5.8.3",
     "vite": "^7.1.7"
+  },
+  "dependencies": {
+    "katex": "^0.16.11"
   }
 }
