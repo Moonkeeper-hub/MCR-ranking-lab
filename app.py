@@ -8,6 +8,13 @@ import streamlit as st
 
 from rating_engine.definitions import FORMULAS
 from formula_component import formula_picker
+from rating_engine.legacy_tables import (
+    LEGACY_LEVELS,
+    KT_PARTICIPANTS,
+    LEGACY_AGE_WEIGHTS,
+    TOURNAMENT_STATUS_BONUS,
+    LEGACY_FIXED_DEFAULTS,
+)
 
 st.set_page_config(page_title="MCR Rating Lab", layout="wide")
 
@@ -164,6 +171,194 @@ def render_control(formula_id, spec, prefix, compact=False):
     return new
 
 
+
+def _legacy_table_state():
+    """Editable experiment copies; canonical tables remain immutable."""
+    if "legacy_ref_experiment" not in st.session_state:
+        st.session_state["legacy_ref_experiment"] = {
+            "kt_enabled": False,
+            "kt_values": dict(KT_PARTICIPANTS),
+            "vt_enabled": False,
+            "vt_values": [
+                (x.min_months, x.max_months, x.weight)
+                for x in LEGACY_AGE_WEIGHTS
+            ],
+        }
+    return st.session_state["legacy_ref_experiment"]
+
+
+def get_legacy_table_overrides():
+    state = _legacy_table_state()
+    overrides = {}
+    if state["kt_enabled"]:
+        overrides["kt_participants"] = dict(state["kt_values"])
+    if state["vt_enabled"]:
+        overrides["age_weights"] = list(state["vt_values"])
+    return overrides or None
+
+
+def render_legacy_reference_tables():
+    state = _legacy_table_state()
+
+    with st.expander("Справочники Legacy — посмотреть и поиграть", expanded=False):
+        st.caption(
+            "Слева — канонические значения из Legacy-документов. "
+            "Они неизменяемы. Для эксперимента редактируется отдельная копия; "
+            "эталонный Legacy default всегда продолжает считать по канону."
+        )
+
+        tab_levels, tab_kt, tab_vt, tab_status, tab_constants = st.tabs(
+            ["Кю/даны ↔ EU", "KT по участникам", "VT / устаревание", "Статус турнира", "Константы"]
+        )
+
+        with tab_levels:
+            levels_df = pd.DataFrame([
+                {
+                    "EU": x.eu,
+                    "Уровень": x.label,
+                    "Тип": "кю" if x.kind == "kyu" else "дан",
+                    "Номер": x.ordinal,
+                }
+                for x in LEGACY_LEVELS
+            ])
+            st.dataframe(levels_df, width="stretch", hide_index=True)
+            st.info(
+                "Таблица уровней пока только для просмотра: произвольное изменение порогов EU "
+                "затрагивает state machine данов, успехов и подтверждений. Для экспериментов "
+                "с этой частью используйте параметры «Шаг дана EU», «Плюсов/минусов на ступень» "
+                "и «Несгораемый EU» слева."
+            )
+
+        with tab_kt:
+            st.checkbox(
+                "Использовать экспериментальную копию KT_ЧУТ",
+                value=state["kt_enabled"],
+                key="legacy_kt_table_enabled",
+            )
+            state["kt_enabled"] = st.session_state["legacy_kt_table_enabled"]
+
+            kt_df = pd.DataFrame([
+                {
+                    "Участники": n,
+                    "Legacy": float(v),
+                    "Эксперимент": float(state["kt_values"].get(n, v)),
+                }
+                for n, v in KT_PARTICIPANTS.items()
+            ])
+
+            edited = st.data_editor(
+                kt_df,
+                width="stretch",
+                hide_index=True,
+                disabled=["Участники", "Legacy"],
+                num_rows="fixed",
+                column_config={
+                    "Участники": st.column_config.NumberColumn(format="%d"),
+                    "Legacy": st.column_config.NumberColumn(format="%.2f"),
+                    "Эксперимент": st.column_config.NumberColumn(format="%.2f", step=0.05),
+                },
+                key="legacy_kt_table_editor",
+            )
+            state["kt_values"] = {
+                int(row["Участники"]): float(row["Эксперимент"])
+                for _, row in edited.iterrows()
+            }
+
+            if st.button("Сбросить KT_ЧУТ к Legacy", key="reset_kt_table"):
+                state["kt_values"] = dict(KT_PARTICIPANTS)
+                state["kt_enabled"] = False
+                st.session_state["legacy_kt_table_enabled"] = False
+                st.session_state.pop("legacy_kt_table_editor", None)
+                st.rerun()
+
+        with tab_vt:
+            st.checkbox(
+                "Использовать экспериментальную таблицу VT",
+                value=state["vt_enabled"],
+                key="legacy_vt_table_enabled",
+            )
+            state["vt_enabled"] = st.session_state["legacy_vt_table_enabled"]
+
+            vt_rows = []
+            current = {
+                (int(a), None if b is None else int(b)): float(w)
+                for a, b, w in state["vt_values"]
+            }
+            for band in LEGACY_AGE_WEIGHTS:
+                key = (band.min_months, band.max_months)
+                period = (
+                    f"{band.min_months}+ мес."
+                    if band.max_months is None
+                    else f"{band.min_months}–{band.max_months} мес."
+                )
+                vt_rows.append({
+                    "Период": period,
+                    "min_months": band.min_months,
+                    "max_months": band.max_months,
+                    "Legacy": band.weight,
+                    "Эксперимент": current.get(key, band.weight),
+                })
+
+            vt_df = pd.DataFrame(vt_rows)
+            edited_vt = st.data_editor(
+                vt_df[["Период", "Legacy", "Эксперимент"]],
+                width="stretch",
+                hide_index=True,
+                disabled=["Период", "Legacy"],
+                num_rows="fixed",
+                column_config={
+                    "Legacy": st.column_config.NumberColumn(format="%.2f"),
+                    "Эксперимент": st.column_config.NumberColumn(
+                        format="%.2f", min_value=0.0, max_value=2.0, step=0.01
+                    ),
+                },
+                key="legacy_vt_table_editor",
+            )
+            new_vt = []
+            for idx, band in enumerate(LEGACY_AGE_WEIGHTS):
+                new_vt.append((
+                    band.min_months,
+                    band.max_months,
+                    float(edited_vt.iloc[idx]["Эксперимент"]),
+                ))
+            state["vt_values"] = new_vt
+
+            if st.button("Сбросить VT к Legacy", key="reset_vt_table"):
+                state["vt_values"] = [
+                    (x.min_months, x.max_months, x.weight)
+                    for x in LEGACY_AGE_WEIGHTS
+                ]
+                state["vt_enabled"] = False
+                st.session_state["legacy_vt_table_enabled"] = False
+                st.session_state.pop("legacy_vt_table_editor", None)
+                st.rerun()
+
+        with tab_status:
+            status_df = pd.DataFrame([
+                {
+                    "Статус": code,
+                    "KT_W Legacy": value,
+                }
+                for code, value in TOURNAMENT_STATUS_BONUS.items()
+            ])
+            st.dataframe(status_df, width="stretch", hide_index=True)
+            st.caption(
+                "Экспериментальный бонус ЧЕ/ЧМ уже управляется ползунком "
+                "«Бонус ЧЕ/ЧМ» в панели слева."
+            )
+
+        with tab_constants:
+            constants_df = pd.DataFrame([
+                {"Параметр": key, "Legacy": value}
+                for key, value in LEGACY_FIXED_DEFAULTS.items()
+            ])
+            st.dataframe(constants_df, width="stretch", hide_index=True)
+            st.caption(
+                "Это нормативные default-значения. Связанные экспериментальные параметры "
+                "меняются ползунками слева, но сами канонические значения не переписываются."
+            )
+
+
 def normalize_ranking(df):
     out = df.copy()
     for col, default in {
@@ -314,11 +509,25 @@ def formula_panel(formula_id: str):
 
 formula_panel(current_formula_id)
 
+if current_formula_id == "legacy":
+    render_legacy_reference_tables()
+
 # Recalculate after possible main-card edit.
 current_params = ensure_formula_state(current_formula_id)
 reference_params = FORMULAS[reference_formula_id].defaults()
-current_result = FORMULAS[current_formula_id].build(current_params).calculate(players, results, evaluation_date)
-reference_result = FORMULAS[reference_formula_id].build(reference_params).calculate(players, results, evaluation_date)
+current_table_overrides = (
+    get_legacy_table_overrides() if current_formula_id == "legacy" else None
+)
+current_result = FORMULAS[current_formula_id].build(
+    current_params,
+    table_overrides=current_table_overrides,
+).calculate(players, results, evaluation_date)
+
+# Reference is always immutable default: no experimental table overrides.
+reference_result = FORMULAS[reference_formula_id].build(
+    reference_params,
+    table_overrides=None,
+).calculate(players, results, evaluation_date)
 comp = compare_rankings(current_result, reference_result)
 
 st.divider()

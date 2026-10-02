@@ -41,19 +41,22 @@ class LegacyConfig:
     # Технические допущения
     cap_player_count_component: bool = True
 
-
-def __post_init__(self):
-    if abs((self.eu_weight + self.t5_weight) - 1.0) > 1e-9:
-        raise ValueError(
-            "Legacy weights must satisfy eu_weight + t5_weight = 1.0"
-        )
+    def __post_init__(self):
+        if abs((self.eu_weight + self.t5_weight) - 1.0) > 1e-9:
+            raise ValueError(
+                "Legacy weights must satisfy eu_weight + t5_weight = 1.0"
+            )
 
 
 class LegacyFormula:
     name = "Legacy"
 
-    def __init__(self, config: LegacyConfig | None = None):
+    def __init__(self, config: LegacyConfig | None = None, table_overrides: dict | None = None):
         self.config = config or LegacyConfig()
+        self.table_overrides = table_overrides or {}
+        self.kt_participants = dict(KT_PARTICIPANTS)
+        self.kt_participants.update(self.table_overrides.get("kt_participants", {}))
+        self.age_weights = self.table_overrides.get("age_weights")
         self.evolution = EvolutionEngine(
             successes_per_step=self.config.successes_per_step,
             failures_per_step=self.config.failures_per_step,
@@ -83,20 +86,20 @@ class LegacyFormula:
 
     def player_count_component(self, participants: int) -> float:
         cfg = self.config
-        if participants in KT_PARTICIPANTS:
-            return KT_PARTICIPANTS[participants] * cfg.player_count_scale
+        if participants in self.kt_participants:
+            return self.kt_participants[participants] * cfg.player_count_scale
 
-        keys = sorted(KT_PARTICIPANTS)
+        keys = sorted(self.kt_participants)
         if participants < keys[0]:
-            return KT_PARTICIPANTS[keys[0]] * cfg.player_count_scale
+            return self.kt_participants[keys[0]] * cfg.player_count_scale
         if participants > keys[-1]:
             if cfg.cap_player_count_component:
-                return KT_PARTICIPANTS[keys[-1]] * cfg.player_count_scale
+                return self.kt_participants[keys[-1]] * cfg.player_count_scale
             raise ValueError(f"Для {participants} участников в Legacy-таблице нет значения.")
 
         lower = max(k for k in keys if k < participants)
         upper = min(k for k in keys if k > participants)
-        y0, y1 = KT_PARTICIPANTS[lower], KT_PARTICIPANTS[upper]
+        y0, y1 = self.kt_participants[lower], self.kt_participants[upper]
         base = y0 + (y1 - y0) * ((participants - lower) / (upper - lower))
         return base * cfg.player_count_scale
 
@@ -135,6 +138,24 @@ class LegacyFormula:
     def tournament_weight(self, tournament_date, evaluation_date) -> float:
         cfg = self.config
         months = self.age_months(tournament_date, evaluation_date)
+
+        # Experimental editable copy of the source VT table.
+        if self.age_weights:
+            for min_months, max_months, weight in self.age_weights:
+                if months >= int(min_months) and (
+                    max_months is None or months <= int(max_months)
+                ):
+                    return float(weight)
+
+        # Canonical Legacy table when scalar decay controls are untouched.
+        if cfg.decay_per_quarter == 0.08 and cfg.max_age_months == 36:
+            for band in LEGACY_AGE_WEIGHTS:
+                if months >= band.min_months and (
+                    band.max_months is None or months <= band.max_months
+                ):
+                    return band.weight
+
+        # Experimental scalar decay.
         if months >= cfg.max_age_months:
             return 0.0
         return max(0.0, 1.0 - cfg.decay_per_quarter * (months // 3))
