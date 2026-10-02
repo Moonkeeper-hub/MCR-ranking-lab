@@ -1,6 +1,0 @@
-ranking.moonkeeper.ru {
-    root * /opt/moonkeeper-ranking
-    encode zstd gzip
-    try_files {path} /index.html
-    file_server
-}
