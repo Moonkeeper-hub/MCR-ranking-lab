@@ -34,11 +34,25 @@ class FormulaDefinition:
     def defaults(self):
         return {p.key: p.default for p in self.parameters}
 
-    def build(self, values: dict | None = None):
-        data = self.defaults()
-        if values:
-            data.update(values)
-        return self.engine_cls(self.config_cls(**data))
+def build(
+    self,
+    values: dict | None = None,
+    table_overrides: dict | None = None,
+):
+    data = self.defaults()
+
+    if values:
+        data.update(values)
+
+    config = self.config_cls(**data)
+
+    if self.id == "legacy":
+        return self.engine_cls(
+            config,
+            table_overrides=table_overrides,
+        )
+
+    return self.engine_cls(config)
 
 
 LEGACY = FormulaDefinition(
