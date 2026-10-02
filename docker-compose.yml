@@ -1,0 +1,7 @@
+services:
+  ranking:
+    build: .
+    container_name: mcr-ranking-lab
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8501:8501"
