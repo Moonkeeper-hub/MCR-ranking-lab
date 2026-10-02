@@ -1,4 +1,4 @@
-# MCR Rating Lab v6
+# MCR Rating Lab v7
 
 Компоновка: интерактивная формула сверху → рейтинговая таблица → дельты → детали игрока. Слева — быстрые настройки и переключение формул.
 
@@ -66,3 +66,12 @@ streamlit run app.py
 - Fixed formula component iframe height feedback loop.
 - Formula iframe now measures only the actual rendered `#root` content.
 - Added `ResizeObserver` for stable height updates without runaway page growth.
+
+
+## v7 — схема БД и неизменяемые Legacy-справочники
+
+- `docs/database.md` — ER-диаграмма БД в Mermaid.
+- `rating_engine/legacy_tables.py` — канонические неизменяемые таблицы Legacy.
+- `db/schema.sql` — черновая PostgreSQL-схема.
+- `db/reference_data.sql` — seed нормативных справочников.
+- `legacy.py` и `evolution.py` используют единый источник табличных значений.

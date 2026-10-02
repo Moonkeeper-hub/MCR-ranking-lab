@@ -9,16 +9,6 @@ from .base import CalculationResult
 from .evolution import EvolutionEngine, EvolutionState, level_label, to_date
 
 
-PLAYER_COUNT_COMPONENT = {
-    12: -0.20, 16: -0.10, 20: 0.00, 24: 0.10, 28: 0.20, 32: 0.30,
-    36: 0.40, 40: 0.50, 44: 0.55, 48: 0.65, 52: 0.70, 56: 0.75,
-    60: 0.80, 64: 0.85, 68: 0.90, 72: 0.90, 76: 0.95, 80: 1.00,
-    84: 1.05, 88: 1.05, 92: 1.10, 96: 1.15, 100: 1.15,
-    104: 1.20, 108: 1.20, 112: 1.25, 116: 1.25, 120: 1.30,
-    124: 1.30, 128: 1.35, 132: 1.35, 136: 1.40, 140: 1.40,
-    144: 1.40, 148: 1.45, 152: 1.45, 156: 1.50, 160: 1.50, 164: 1.50,
-}
-
 
 @dataclass(frozen=True)
 class LegacyConfig:
@@ -85,20 +75,20 @@ class LegacyFormula:
 
     def player_count_component(self, participants: int) -> float:
         cfg = self.config
-        if participants in PLAYER_COUNT_COMPONENT:
-            return PLAYER_COUNT_COMPONENT[participants] * cfg.player_count_scale
+        if participants in KT_PARTICIPANTS:
+            return KT_PARTICIPANTS[participants] * cfg.player_count_scale
 
-        keys = sorted(PLAYER_COUNT_COMPONENT)
+        keys = sorted(KT_PARTICIPANTS)
         if participants < keys[0]:
-            return PLAYER_COUNT_COMPONENT[keys[0]] * cfg.player_count_scale
+            return KT_PARTICIPANTS[keys[0]] * cfg.player_count_scale
         if participants > keys[-1]:
             if cfg.cap_player_count_component:
-                return PLAYER_COUNT_COMPONENT[keys[-1]] * cfg.player_count_scale
+                return KT_PARTICIPANTS[keys[-1]] * cfg.player_count_scale
             raise ValueError(f"Для {participants} участников в Legacy-таблице нет значения.")
 
         lower = max(k for k in keys if k < participants)
         upper = min(k for k in keys if k > participants)
-        y0, y1 = PLAYER_COUNT_COMPONENT[lower], PLAYER_COUNT_COMPONENT[upper]
+        y0, y1 = KT_PARTICIPANTS[lower], KT_PARTICIPANTS[upper]
         base = y0 + (y1 - y0) * ((participants - lower) / (upper - lower))
         return base * cfg.player_count_scale
 

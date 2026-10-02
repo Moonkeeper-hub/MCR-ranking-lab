@@ -9,35 +9,7 @@ import pandas as pd
 # Актуальная шкала из черновика Приложения 2 (2026):
 # 12–7 кю: 0..250 шаг 50; 6–1 кю: 500..1750 шаг 250;
 # 1–12 дан: 2000..7500 шаг 500.
-LEVELS = [
-    (0, "12 кю"),
-    (50, "11 кю"),
-    (100, "10 кю"),
-    (150, "9 кю"),
-    (200, "8 кю"),
-    (250, "7 кю"),
-    (500, "6 кю"),
-    (750, "5 кю"),
-    (1000, "4 кю"),
-    (1250, "3 кю"),
-    (1500, "2 кю"),
-    (1750, "1 кю"),
-    (2000, "1 дан"),
-    (2500, "2 дан"),
-    (3000, "3 дан"),
-    (3500, "4 дан"),
-    (4000, "5 дан"),
-    (4500, "6 дан"),
-    (5000, "7 дан"),
-    (5500, "8 дан"),
-    (6000, "9 дан"),
-    (6500, "10 дан"),
-    (7000, "11 дан"),
-    (7500, "12 дан"),
-]
-LEVEL_VALUES = [v for v, _ in LEVELS]
-LEVEL_LABELS = dict(LEVELS)
-
+from .legacy_tables import LEGACY_LEVELS, LEVEL_VALUES, EU_TO_LEVEL
 
 def to_date(value) -> date | None:
     if value is None or (isinstance(value, float) and math.isnan(value)):
@@ -58,7 +30,7 @@ def performed_norm(value: float) -> int:
 
 
 def level_label(eu: int, marks: int = 0) -> str:
-    label = LEVEL_LABELS.get(int(eu), f"EU {int(eu)}")
+    label = EU_TO_LEVEL[int(eu)].label if int(eu) in EU_TO_LEVEL else f"EU {int(eu)}"
     if eu >= 2000:
         if marks > 0:
             label += "+" * marks
