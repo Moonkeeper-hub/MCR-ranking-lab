@@ -55,75 +55,108 @@ def get_spec(formula_id, key):
     return None
 
 
-def _sync_legacy_weight_widgets(changed_key, changed_widget_key):
-    """Keep EU/T5 weights complementary in every visible control."""
-    value = round(float(st.session_state[changed_widget_key]), 2)
-    value = min(1.0, max(0.0, value))
-    other_key = "t5_weight" if changed_key == "eu_weight" else "eu_weight"
-    other_value = round(1.0 - value, 2)
+def _widget_key(prefix, formula_id, param_key):
+    return f"{prefix}::{formula_id}::{param_key}"
 
-    params = ensure_formula_state("legacy")
-    params[changed_key] = value
-    params[other_key] = other_value
 
-    # The same parameter can be rendered in the sidebar and in the formula card.
-    # Update any already-created counterpart widget so both sliders visibly mirror.
+def _sync_param_from_widget(formula_id, param_key, changed_widget_key):
+    """
+    Widget -> canonical formula state.
+
+    This callback runs BEFORE Streamlit reruns the script. Therefore the new
+    widget value is copied to the canonical parameter state before any control
+    is rendered again. This is the crucial bit: ordinary sliders must never be
+    overwritten from the old canonical value during the rerun.
+    """
+    value = st.session_state[changed_widget_key]
+    params = ensure_formula_state(formula_id)
+    params[param_key] = value
+
+    # Mirror the same parameter if it is visible both in the sidebar and
+    # in the selected-formula card.
     for prefix in ("sidebar", "formula_card"):
-        own_widget = f"{prefix}::legacy::{changed_key}"
-        other_widget = f"{prefix}::legacy::{other_key}"
-        if own_widget in st.session_state and own_widget != changed_widget_key:
-            st.session_state[own_widget] = value
-        if other_widget in st.session_state:
-            st.session_state[other_widget] = other_value
+        key = _widget_key(prefix, formula_id, param_key)
+        if key in st.session_state and key != changed_widget_key:
+            st.session_state[key] = value
+
+    # Legacy final-rating weights are complementary by definition.
+    if formula_id == "legacy" and param_key in ("eu_weight", "t5_weight"):
+        value = round(float(value), 2)
+        other_key = "t5_weight" if param_key == "eu_weight" else "eu_weight"
+        other_value = round(1.0 - value, 2)
+
+        params[param_key] = value
+        params[other_key] = other_value
+
+        for prefix in ("sidebar", "formula_card"):
+            own_widget = _widget_key(prefix, formula_id, param_key)
+            other_widget = _widget_key(prefix, formula_id, other_key)
+
+            if own_widget in st.session_state:
+                st.session_state[own_widget] = value
+            if other_widget in st.session_state:
+                st.session_state[other_widget] = other_value
 
 
 def _clear_formula_widget_state(formula_id):
-    prefixes = ("sidebar", "formula_card")
     for spec in FORMULAS[formula_id].parameters:
-        for prefix in prefixes:
-            st.session_state.pop(f"{prefix}::{formula_id}::{spec.key}", None)
+        for prefix in ("sidebar", "formula_card"):
+            st.session_state.pop(_widget_key(prefix, formula_id, spec.key), None)
 
 
 def render_control(formula_id, spec, prefix, compact=False):
-    value = get_param(formula_id, spec.key)
-    widget_key = f"{prefix}::{formula_id}::{spec.key}"
+    """
+    Render one control with session_state as the widget's source of truth.
 
-    # If another mirrored control changed the canonical value, seed this widget
-    # with that value before rendering it.
-    if widget_key in st.session_state and st.session_state[widget_key] != value:
-        st.session_state[widget_key] = value
+    We seed a widget only on first creation. On later reruns we do NOT write
+    the canonical/default value back into its key; doing that was the v8 bug
+    that made sliders snap immediately to their defaults.
+    """
+    widget_key = _widget_key(prefix, formula_id, spec.key)
 
-    callback = None
-    callback_args = ()
-    if formula_id == "legacy" and spec.key in ("eu_weight", "t5_weight"):
-        callback = _sync_legacy_weight_widgets
-        callback_args = (spec.key, widget_key)
+    if widget_key not in st.session_state:
+        st.session_state[widget_key] = get_param(formula_id, spec.key)
 
     common = {
         "key": widget_key,
+        "on_change": _sync_param_from_widget,
+        "args": (formula_id, spec.key, widget_key),
     }
-    if callback:
-        common["on_change"] = callback
-        common["args"] = callback_args
 
     if spec.control == "slider":
         new = st.slider(
-            spec.label, spec.min_value, spec.max_value, value, spec.step, **common
+            spec.label,
+            spec.min_value,
+            spec.max_value,
+            step=spec.step,
+            **common,
         )
     elif spec.control == "number":
         new = st.number_input(
-            spec.label, spec.min_value, spec.max_value, value, spec.step, **common
+            spec.label,
+            min_value=spec.min_value,
+            max_value=spec.max_value,
+            step=spec.step,
+            **common,
         )
     elif spec.control == "select_slider":
-        new = st.select_slider(spec.label, options=spec.options, value=value, **common)
+        new = st.select_slider(
+            spec.label,
+            options=spec.options,
+            **common,
+        )
     elif spec.control == "checkbox":
-        new = st.checkbox(spec.label, value=bool(value), **common)
+        new = st.checkbox(
+            spec.label,
+            **common,
+        )
     else:
-        new = value
+        new = get_param(formula_id, spec.key)
 
+    # Normally the callback has already synchronized the canonical state.
+    # This assignment also covers first render safely.
     set_param(formula_id, spec.key, new)
 
-    # Defensive invariant even if a value arrives from a future non-UI source.
     if formula_id == "legacy" and spec.key in ("eu_weight", "t5_weight"):
         other_key = "t5_weight" if spec.key == "eu_weight" else "eu_weight"
         set_param(formula_id, other_key, round(1.0 - float(new), 2))
