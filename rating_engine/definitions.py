@@ -52,7 +52,7 @@ class FormulaDefinition:
                 table_overrides=table_overrides,
             )
 
-    return self.engine_cls(config)
+        return self.engine_cls(config)
 
 
 LEGACY = FormulaDefinition(
