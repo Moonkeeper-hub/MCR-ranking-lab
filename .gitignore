@@ -3,5 +3,5 @@ dist/
 .vscode/
 *.log
 .DS_Store
-
 tsconfig.tsbuildinfo
+DEPLOY.md

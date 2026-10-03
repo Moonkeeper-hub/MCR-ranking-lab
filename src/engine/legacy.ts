@@ -10,6 +10,7 @@ import type {
   ResultInput,
   TableOverrides,
   TournamentDetail,
+  CalculationOptions,
 } from "./types";
 
 function parseDate(value: string | Date): Date {
@@ -110,24 +111,46 @@ export class LegacyEngine {
     return Math.max(0, 1 - this.config.decayPerQuarter * Math.floor(months / 3));
   }
 
-  calculate(playersInput: PlayerInput[], resultsInput: ResultInput[], evaluationDateInput: string | Date): CalculationResult {
+  calculate(
+    playersInput: PlayerInput[],
+    resultsInput: ResultInput[],
+    evaluationDateInput: string | Date,
+    options: CalculationOptions = {},
+  ): CalculationResult {
     const evaluationDate = parseDate(evaluationDateInput);
-    const players = playersInput.map((p) => ({
-      ...p,
-      player_id: String(p.player_id),
-      initial_eu: Number(p.initial_eu ?? 0),
-      initial_marks: Number(p.initial_marks ?? 0),
-      initial_dan_date: String(p.initial_dan_date ?? ""),
-    }));
-    const results = resultsInput.map((r) => ({
-      ...r,
-      player_id: String(r.player_id),
-      tournament_order: Number(r.tournament_order ?? 0),
-      place: Number(r.place),
-      participants: Number(r.participants),
-      sessions: Number(r.sessions),
-      is_world_europe: Boolean(r.is_world_europe),
-    }));
+
+    // A rating "at date D" is a real historical slice: events after D do not
+    // exist for this calculation and therefore cannot affect EU, marks, KT/T5
+    // or the set of newly appearing players.
+    const results = resultsInput
+      .map((r) => ({
+        ...r,
+        player_id: String(r.player_id),
+        tournament_order: Number(r.tournament_order ?? 0),
+        place: Number(r.place),
+        participants: Number(r.participants),
+        sessions: Number(r.sessions),
+        is_world_europe: Boolean(r.is_world_europe),
+      }))
+      .filter((r) => parseDate(r.tournament_date).getTime() <= evaluationDate.getTime());
+
+    const activePlayerIds = new Set(results.map((r) => r.player_id));
+    const players = playersInput
+      .map((p) => ({
+        ...p,
+        player_id: String(p.player_id),
+        initial_eu: Number(p.initial_eu ?? 0),
+        initial_marks: Number(p.initial_marks ?? 0),
+        initial_dan_date: String(p.initial_dan_date ?? ""),
+      }))
+      .filter((p) => {
+        if (options.includeAllPlayers) return true;
+        const hasInitialState =
+          Number(p.initial_eu ?? 0) !== 0
+          || Number(p.initial_marks ?? 0) !== 0
+          || Boolean(String(p.initial_dan_date ?? "").trim());
+        return hasInitialState || activePlayerIds.has(p.player_id);
+      });
 
     const states = new Map<string, EvolutionState>();
     const names = new Map<string, string>();

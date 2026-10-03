@@ -98,3 +98,31 @@ export interface CalculationResult {
   ranking: RankingRow[];
   tournamentRows: TournamentDetail[];
 }
+
+
+export interface CalculationOptions {
+  /**
+   * If false, players with no initial state only appear after their first
+   * tournament in the visible history. If true, every imported player exists
+   * at the start of the calculation.
+   */
+  includeAllPlayers?: boolean;
+}
+
+export type InitialStateMode = "clean" | "imported";
+
+export interface TournamentEvent {
+  tournamentId: string;
+  tournamentName: string;
+  tournamentDate: string;
+  tournamentOrder: number;
+  participants: number;
+  sessions: number;
+  isWorldEurope: boolean;
+}
+
+export interface RatingSnapshot {
+  index: number;
+  event: TournamentEvent;
+  result: CalculationResult;
+}

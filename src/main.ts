@@ -3,6 +3,7 @@ import "./styles.css";
 import "katex/dist/katex.min.css";
 import { renderLegacyMath } from "./ui/formulas";
 import { LegacyEngine, defaultLegacyConfig } from "./engine/legacy";
+import { simulateLegacyHistory } from "./engine/simulation";
 import {
   KT_PARTICIPANTS,
   LEGACY_AGE_WEIGHTS,
@@ -15,6 +16,8 @@ import type {
   PlayerInput,
   ResultInput,
   TableOverrides,
+  InitialStateMode,
+  RatingSnapshot,
 } from "./engine/types";
 import { loadCsvPair, playersFromCsv, resultsFromCsv } from "./data/csv";
 
@@ -49,6 +52,14 @@ let rankingSortKey: RankingSortKey = "rank";
 let rankingSortDir: "asc" | "desc" = "asc";
 let expandedPlayerId: string | null = null;
 
+let activeWorkspace: "lab" | "history" = "lab";
+let historyInitialMode: InitialStateMode = "clean";
+let historySnapshots: RatingSnapshot[] = [];
+let historyReferenceSnapshots: RatingSnapshot[] = [];
+let historySnapshotIndex = 0;
+let historyPlayerId: string | null = null;
+let historyDirty = true;
+
 
 function esc(v: unknown): string {
   return String(v ?? "").replace(/[&<>"']/g, (ch) => ({
@@ -74,10 +85,16 @@ function recalc(): void {
   try {
     current = new LegacyEngine(currentConfig, overrides).calculate(players, results, evaluationDate);
     reference = new LegacyEngine(defaultLegacyConfig()).calculate(players, results, evaluationDate);
+    historyDirty = true;
     syncAllControlValues();
     renderFormulaMath();
     renderOutput();
-    setStatus(`Рассчитано локально: ${players.length} игроков, ${results.length} результатов`, true);
+    if (activeWorkspace === "history") renderHistoryWorkspace();
+    const visibleResults = results.filter((r) => String(r.tournament_date) <= evaluationDate).length;
+    setStatus(
+      `Срез ${evaluationDate}: ${current.ranking.length} игроков, ${visibleResults} результатов`,
+      true,
+    );
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), false);
   }
@@ -188,11 +205,21 @@ function renderShell(): void {
       <header class="topbar">
         <div>
           <h1>MCR Rating Lab</h1>
-          <div class="subtitle">v0.23 · TypeScript · расчёт выполняется в браузере</div>
+          <div class="subtitle">v0.24 · TypeScript · расчёт выполняется в браузере</div>
         </div>
         <div class="privacy-pill">CSV остаются на устройстве пользователя</div>
       </header>
 
+      <nav class="workspace-tabs" aria-label="Режим работы">
+        <button id="workspaceLab" class="workspace-tab active" type="button">
+          Лаборатория
+        </button>
+        <button id="workspaceHistory" class="workspace-tab" type="button">
+          История / симуляция
+        </button>
+      </nav>
+
+      <div id="labWorkspace" class="workspace-panel active">
       <div class="layout">
         <aside class="sidebar">
           <section class="side-card">
@@ -325,6 +352,51 @@ function renderShell(): void {
           </section>
         </main>
       </div>
+      </div>
+
+      <section id="historyWorkspace" class="workspace-panel history-workspace">
+        <section class="history-card">
+          <div class="history-header">
+            <div>
+              <div class="eyebrow">Последовательная симуляция</div>
+              <div class="formula-caption">
+                Каждый шаг — состояние рейтинга непосредственно после очередного турнира.
+              </div>
+            </div>
+            <label class="history-mode">
+              Начальное состояние
+              <select id="historyInitialMode">
+                <option value="clean" ${historyInitialMode === "clean" ? "selected" : ""}>
+                  Чистый старт
+                </option>
+                <option value="imported" ${historyInitialMode === "imported" ? "selected" : ""}>
+                  Игроки + импортированный EU
+                </option>
+              </select>
+            </label>
+          </div>
+
+          <div id="historySummary" class="history-summary"></div>
+
+          <div class="timeline-control">
+            <input id="historySlider" type="range" min="0" max="0" step="1" value="0">
+            <div id="historyTicks" class="history-ticks"></div>
+          </div>
+        </section>
+
+        <section class="history-card">
+          <div class="history-player-toolbar">
+            <div>
+              <strong>Движение игрока</strong>
+              <span class="micro">экспериментальная Legacy против Legacy default</span>
+            </div>
+            <select id="historyPlayerSelect"></select>
+          </div>
+          <div id="historyPlayerChart"></div>
+        </section>
+
+        <section id="historySnapshotPanel" class="history-card"></section>
+      </section>
     </div>`;
 
   byId("dataLabel").textContent = dataLabel;
@@ -360,6 +432,26 @@ function renderShell(): void {
   });
 
   byId("exportRankingCsv").addEventListener("click", exportRankingCsv);
+
+  byId("workspaceLab").addEventListener("click", () => setWorkspace("lab"));
+  byId("workspaceHistory").addEventListener("click", () => setWorkspace("history"));
+
+  byId<HTMLSelectElement>("historyInitialMode").addEventListener("change", (e) => {
+    historyInitialMode = (e.currentTarget as HTMLSelectElement).value as InitialStateMode;
+    historyDirty = true;
+    historySnapshotIndex = 0;
+    renderHistoryWorkspace();
+  });
+
+  byId<HTMLInputElement>("historySlider").addEventListener("input", (e) => {
+    historySnapshotIndex = Number((e.currentTarget as HTMLInputElement).value);
+    renderHistorySnapshot();
+  });
+
+  byId<HTMLSelectElement>("historyPlayerSelect").addEventListener("change", (e) => {
+    historyPlayerId = (e.currentTarget as HTMLSelectElement).value || null;
+    renderHistoryPlayerChart();
+  });
 
   setupTabs();
   renderFormulaInspector();
@@ -1016,6 +1108,332 @@ function renderOutput(): void {
     </div>`;
 
   bindRankingInteractions();
+}
+
+
+function setWorkspace(workspace: "lab" | "history"): void {
+  activeWorkspace = workspace;
+  const lab = byId("labWorkspace");
+  const history = byId("historyWorkspace");
+  const labButton = byId("workspaceLab");
+  const historyButton = byId("workspaceHistory");
+
+  lab.classList.toggle("active", workspace === "lab");
+  history.classList.toggle("active", workspace === "history");
+  labButton.classList.toggle("active", workspace === "lab");
+  historyButton.classList.toggle("active", workspace === "history");
+
+  if (workspace === "history") renderHistoryWorkspace();
+}
+
+function historyOverrides(): TableOverrides {
+  const overrides: TableOverrides = {};
+  if (useKtExperiment) overrides.ktParticipants = ktExperiment;
+  if (useVtExperiment) overrides.ageWeights = vtExperiment;
+  return overrides;
+}
+
+function ensureHistorySnapshots(): void {
+  if (!historyDirty) return;
+
+  historySnapshots = simulateLegacyHistory(
+    players,
+    results,
+    currentConfig,
+    historyOverrides(),
+    historyInitialMode,
+  );
+  historyReferenceSnapshots = simulateLegacyHistory(
+    players,
+    results,
+    defaultLegacyConfig(),
+    {},
+    historyInitialMode,
+  );
+
+  historyDirty = false;
+
+  if (!historySnapshots.length) {
+    historySnapshotIndex = 0;
+    historyPlayerId = null;
+    return;
+  }
+
+  historySnapshotIndex = Math.min(historySnapshotIndex, historySnapshots.length - 1);
+
+  const latest = historySnapshots[historySnapshots.length - 1];
+  if (
+    !historyPlayerId
+    || !latest.result.ranking.some((row) => row.playerId === historyPlayerId)
+  ) {
+    historyPlayerId = latest.result.ranking[0]?.playerId ?? null;
+  }
+}
+
+function renderHistoryWorkspace(): void {
+  ensureHistorySnapshots();
+
+  const summary = byId("historySummary");
+  const slider = byId<HTMLInputElement>("historySlider");
+  const ticks = byId("historyTicks");
+  const select = byId<HTMLSelectElement>("historyPlayerSelect");
+
+  if (!historySnapshots.length) {
+    summary.innerHTML = `<div class="notice">Нет турниров для построения временной шкалы.</div>`;
+    ticks.innerHTML = "";
+    select.innerHTML = "";
+    byId("historyPlayerChart").innerHTML = "";
+    byId("historySnapshotPanel").innerHTML = "";
+    slider.min = "0";
+    slider.max = "0";
+    slider.value = "0";
+    return;
+  }
+
+  const first = historySnapshots[0].event;
+  const last = historySnapshots[historySnapshots.length - 1].event;
+
+  summary.innerHTML = `
+    <div class="history-stat"><span>Турниров</span><strong>${historySnapshots.length}</strong></div>
+    <div class="history-stat"><span>Период</span><strong>${esc(first.tournamentDate)} → ${esc(last.tournamentDate)}</strong></div>
+    <div class="history-stat"><span>Старт</span><strong>${historyInitialMode === "clean" ? "чистый" : "импортированный EU"}</strong></div>
+    <div class="history-stat"><span>Методы</span><strong>Legacy exp. / default</strong></div>
+  `;
+
+  slider.min = "0";
+  slider.max = String(historySnapshots.length - 1);
+  slider.value = String(historySnapshotIndex);
+
+  ticks.innerHTML = historySnapshots.map((snapshot, i) => `
+    <button
+      type="button"
+      class="timeline-tick ${i === historySnapshotIndex ? "active" : ""}"
+      data-history-index="${i}"
+      title="${esc(snapshot.event.tournamentDate)} · ${esc(snapshot.event.tournamentName)}"
+      aria-label="${esc(snapshot.event.tournamentName)}"
+    >
+      <span></span>
+    </button>
+  `).join("");
+
+  ticks.querySelectorAll<HTMLButtonElement>("[data-history-index]").forEach((button) => {
+    button.addEventListener("click", () => {
+      historySnapshotIndex = Number(button.dataset.historyIndex);
+      slider.value = String(historySnapshotIndex);
+      renderHistoryWorkspace();
+    });
+  });
+
+  const latestPlayers = historySnapshots[historySnapshots.length - 1].result.ranking;
+  select.innerHTML = latestPlayers.map((row) =>
+    `<option value="${esc(row.playerId)}" ${row.playerId === historyPlayerId ? "selected" : ""}>`
+    + `${esc(row.playerName)} · #${row.rank}</option>`
+  ).join("");
+
+  renderHistoryPlayerChart();
+  renderHistorySnapshot();
+}
+
+function historySeriesForPlayer(
+  snapshots: RatingSnapshot[],
+  playerId: string,
+): { index: number; rank: number; rating: number; date: string }[] {
+  const points: { index: number; rank: number; rating: number; date: string }[] = [];
+  snapshots.forEach((snapshot, index) => {
+    const row = snapshot.result.ranking.find((x) => x.playerId === playerId);
+    if (row) {
+      points.push({
+        index,
+        rank: row.rank,
+        rating: row.rating,
+        date: snapshot.event.tournamentDate,
+      });
+    }
+  });
+  return points;
+}
+
+function svgPolyline(
+  series: { index: number; rank: number }[],
+  maxIndex: number,
+  maxRank: number,
+  width: number,
+  height: number,
+  padX: number,
+  padY: number,
+): string {
+  if (!series.length) return "";
+  const innerW = width - padX * 2;
+  const innerH = height - padY * 2;
+  return series.map((p) => {
+    const x = padX + (maxIndex > 0 ? (p.index / maxIndex) * innerW : innerW / 2);
+    const y = padY + (maxRank > 1 ? ((p.rank - 1) / (maxRank - 1)) * innerH : innerH / 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+}
+
+function renderHistoryPlayerChart(): void {
+  const host = byId("historyPlayerChart");
+  if (!historyPlayerId || !historySnapshots.length) {
+    host.innerHTML = `<div class="micro">Выберите игрока.</div>`;
+    return;
+  }
+
+  const exp = historySeriesForPlayer(historySnapshots, historyPlayerId);
+  const ref = historySeriesForPlayer(historyReferenceSnapshots, historyPlayerId);
+  const latest = historySnapshots[historySnapshots.length - 1].result.ranking
+    .find((x) => x.playerId === historyPlayerId);
+  const name = latest?.playerName ?? historyPlayerId;
+
+  const maxIndex = Math.max(1, historySnapshots.length - 1);
+  const maxRank = Math.max(
+    2,
+    ...exp.map((x) => x.rank),
+    ...ref.map((x) => x.rank),
+  );
+
+  const width = 1000;
+  const height = 220;
+  const padX = 46;
+  const padY = 22;
+  const expPoints = svgPolyline(exp, maxIndex, maxRank, width, height, padX, padY);
+  const refPoints = svgPolyline(ref, maxIndex, maxRank, width, height, padX, padY);
+  const selectedX = padX
+    + (historySnapshotIndex / maxIndex) * (width - padX * 2);
+
+  const selectedExp = historySnapshots[historySnapshotIndex]?.result.ranking
+    .find((x) => x.playerId === historyPlayerId);
+  const selectedRef = historyReferenceSnapshots[historySnapshotIndex]?.result.ranking
+    .find((x) => x.playerId === historyPlayerId);
+
+  host.innerHTML = `
+    <div class="chart-head">
+      <strong>${esc(name)}</strong>
+      <div class="chart-legend">
+        <span><i class="legend-line experimental"></i> экспериментальная</span>
+        <span><i class="legend-line reference"></i> Legacy default</span>
+      </div>
+    </div>
+    <svg class="history-chart" viewBox="0 0 ${width} ${height}" role="img"
+      aria-label="Движение места игрока во времени">
+      <line x1="${padX}" y1="${padY}" x2="${padX}" y2="${height - padY}" class="chart-axis"/>
+      <line x1="${padX}" y1="${height - padY}" x2="${width - padX}" y2="${height - padY}" class="chart-axis"/>
+      <text x="8" y="${padY + 4}" class="chart-label">#1</text>
+      <text x="8" y="${height - padY + 4}" class="chart-label">#${maxRank}</text>
+      <line x1="${selectedX}" y1="${padY}" x2="${selectedX}" y2="${height - padY}" class="chart-cursor"/>
+      ${refPoints ? `<polyline points="${refPoints}" class="chart-series reference"/>` : ""}
+      ${expPoints ? `<polyline points="${expPoints}" class="chart-series experimental"/>` : ""}
+    </svg>
+    <div class="chart-selected">
+      <span>Точка ${historySnapshotIndex + 1}/${historySnapshots.length}</span>
+      <span>Эксп.: <strong>${selectedExp ? `#${selectedExp.rank} · ${fmt(selectedExp.rating)}` : "—"}</strong></span>
+      <span>Default: <strong>${selectedRef ? `#${selectedRef.rank} · ${fmt(selectedRef.rating)}` : "—"}</strong></span>
+    </div>
+  `;
+}
+
+function renderHistorySnapshot(): void {
+  if (!historySnapshots.length) return;
+
+  const snapshot = historySnapshots[historySnapshotIndex];
+  const refSnapshot = historyReferenceSnapshots[historySnapshotIndex];
+  const previous = historySnapshotIndex > 0
+    ? historySnapshots[historySnapshotIndex - 1]
+    : null;
+
+  const previousById = new Map(
+    (previous?.result.ranking ?? []).map((row) => [row.playerId, row]),
+  );
+  const refById = new Map(
+    (refSnapshot?.result.ranking ?? []).map((row) => [row.playerId, row]),
+  );
+
+  const movers = snapshot.result.ranking
+    .map((row) => {
+      const before = previousById.get(row.playerId);
+      const ref = refById.get(row.playerId);
+      return {
+        ...row,
+        movement: before ? before.rank - row.rank : 0,
+        previousRank: before?.rank ?? null,
+        refRank: ref?.rank ?? null,
+        refRating: ref?.rating ?? Number.NaN,
+      };
+    })
+    .sort((a, b) => Math.abs(b.movement) - Math.abs(a.movement) || a.rank - b.rank);
+
+  const details = snapshot.result.tournamentRows
+    .filter((row) => row.tournamentId === snapshot.event.tournamentId
+      && row.tournamentDate === snapshot.event.tournamentDate);
+  const kt = details[0]?.kt;
+  const meanEu = details[0]?.meanEuFinal;
+
+  byId<HTMLInputElement>("historySlider").value = String(historySnapshotIndex);
+  document.querySelectorAll(".timeline-tick").forEach((el, i) =>
+    el.classList.toggle("active", i === historySnapshotIndex)
+  );
+
+  byId("historySnapshotPanel").innerHTML = `
+    <div class="snapshot-head">
+      <div>
+        <div class="snapshot-step">Шаг ${historySnapshotIndex + 1} из ${historySnapshots.length}</div>
+        <h2>${esc(snapshot.event.tournamentName)}</h2>
+        <div class="reference-labels">
+          <span>${esc(snapshot.event.tournamentDate)}</span>
+          <span>${snapshot.event.participants} игроков</span>
+          <span>${snapshot.event.sessions} сессий</span>
+          <span>KT: <strong>${kt === undefined ? "—" : fmt(kt)}</strong></span>
+          <span>ср. EU: <strong>${meanEu === undefined ? "—" : fmt(meanEu, 0)}</strong></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="snapshot-grid">
+      <div>
+        <div class="snapshot-subtitle">Наибольшие движения после турнира</div>
+        <div class="table-wrap snapshot-movers-wrap">
+          <table class="snapshot-table">
+            <thead><tr><th>Игрок</th><th>До</th><th>После</th><th>Δ место</th><th>Rating</th></tr></thead>
+            <tbody>
+              ${movers.slice(0, 10).map((row) => `<tr>
+                <td>${esc(row.playerName)}</td>
+                <td>${row.previousRank ? `#${row.previousRank}` : "new"}</td>
+                <td>#${row.rank}</td>
+                <td class="${row.movement > 0 ? "pos" : row.movement < 0 ? "neg" : ""}">
+                  ${row.movement > 0 ? "+" : ""}${row.movement}
+                </td>
+                <td>${fmt(row.rating)}</td>
+              </tr>`).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div>
+        <div class="snapshot-subtitle">Рейтинг после этого шага</div>
+        <div class="table-wrap snapshot-ranking-wrap">
+          <table class="snapshot-table">
+            <thead><tr><th>#</th><th>Игрок</th><th>EU</th><th>T5</th><th>Rating</th><th>Ref #</th></tr></thead>
+            <tbody>
+              ${snapshot.result.ranking.slice(0, 25).map((row) => {
+                const ref = refById.get(row.playerId);
+                return `<tr>
+                  <td>${row.rank}</td>
+                  <td>${esc(row.playerName)}</td>
+                  <td>${row.currentEu}</td>
+                  <td>${fmt(row.t5, 1)}</td>
+                  <td class="emph">${fmt(row.rating)}</td>
+                  <td>${ref ? `#${ref.rank}` : "—"}</td>
+                </tr>`;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `;
+
+  renderHistoryPlayerChart();
 }
 
 async function loadFiles(): Promise<void> {
