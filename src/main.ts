@@ -33,6 +33,23 @@ let dataLabel = "встроенный RR/offline dataset";
 let activeFormulaToken: string | null = null;
 let activeReferenceTab = 0;
 
+type RankingSortKey =
+  | "rank"
+  | "playerName"
+  | "level"
+  | "currentEu"
+  | "t5"
+  | "rating"
+  | "refRating"
+  | "deltaRating"
+  | "deltaRank";
+
+let rankingSearch = "";
+let rankingSortKey: RankingSortKey = "rank";
+let rankingSortDir: "asc" | "desc" = "asc";
+let expandedPlayerId: string | null = null;
+
+
 function esc(v: unknown): string {
   return String(v ?? "").replace(/[&<>"']/g, (ch) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
@@ -171,7 +188,7 @@ function renderShell(): void {
       <header class="topbar">
         <div>
           <h1>MCR Rating Lab</h1>
-          <div class="subtitle">v0.22 · TypeScript · расчёт выполняется в браузере</div>
+          <div class="subtitle">v0.23 · TypeScript · расчёт выполняется в браузере</div>
         </div>
         <div class="privacy-pill">CSV остаются на устройстве пользователя</div>
       </header>
@@ -291,6 +308,19 @@ function renderShell(): void {
               </div>
               <div id="metrics" class="metrics-strip"></div>
             </div>
+
+            <div class="ranking-toolbar">
+              <label class="ranking-search">
+                <span>Поиск</span>
+                <input id="rankingSearch" type="search" placeholder="Игрок, ID, уровень…" value="${esc(rankingSearch)}">
+              </label>
+              <div class="ranking-toolbar-actions">
+                <span id="rankingVisibleCount" class="micro"></span>
+                <button id="exportRankingCsv" class="download-button" type="button">↓ CSV</button>
+              </div>
+            </div>
+
+            <div id="deltaLeaders" class="delta-leaders"></div>
             <div id="ranking"></div>
           </section>
         </main>
@@ -323,6 +353,13 @@ function renderShell(): void {
 
   byId("loadFiles").addEventListener("click", loadFiles);
   byId("loadBuiltin").addEventListener("click", loadBuiltin);
+
+  byId<HTMLInputElement>("rankingSearch").addEventListener("input", (e) => {
+    rankingSearch = (e.currentTarget as HTMLInputElement).value;
+    renderOutput();
+  });
+
+  byId("exportRankingCsv").addEventListener("click", exportRankingCsv);
 
   setupTabs();
   renderFormulaInspector();
@@ -651,22 +688,232 @@ function table(headers: string[], rows: (string | number)[][], cls = ""): string
   </table></div>`;
 }
 
+
+type DiffRow = NonNullable<CalculationResult["ranking"][number]> & {
+  refRating: number;
+  deltaRating: number;
+  deltaRank: number;
+};
+
+function getDiffRows(): DiffRow[] {
+  if (!current || !reference) return [];
+  const refById = new Map(reference.ranking.map((x) => [x.playerId, x]));
+  return current.ranking.map((x) => {
+    const ref = refById.get(x.playerId);
+    return {
+      ...x,
+      refRating: ref?.rating ?? Number.NaN,
+      deltaRating: ref ? x.rating - ref.rating : Number.NaN,
+      deltaRank: ref ? ref.rank - x.rank : 0,
+    };
+  });
+}
+
+function compareValues(a: string | number, b: string | number): number {
+  if (typeof a === "number" && typeof b === "number") {
+    const aa = Number.isNaN(a) ? Number.NEGATIVE_INFINITY : a;
+    const bb = Number.isNaN(b) ? Number.NEGATIVE_INFINITY : b;
+    return aa - bb;
+  }
+  return String(a).localeCompare(String(b), "ru", { numeric: true, sensitivity: "base" });
+}
+
+function sortRankingRows(rows: DiffRow[]): DiffRow[] {
+  const dir = rankingSortDir === "asc" ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    const av = a[rankingSortKey];
+    const bv = b[rankingSortKey];
+    const cmp = compareValues(av as string | number, bv as string | number);
+    return cmp * dir || a.rank - b.rank;
+  });
+}
+
+function sortHeader(label: string, key: RankingSortKey, extraClass = ""): string {
+  const active = rankingSortKey === key;
+  const arrow = active ? (rankingSortDir === "asc" ? "▲" : "▼") : "↕";
+  return `<th class="${extraClass}">
+    <button class="sort-button ${active ? "active" : ""}" data-sort-key="${key}" type="button">
+      <span>${esc(label)}</span><span class="sort-arrow">${arrow}</span>
+    </button>
+  </th>`;
+}
+
+function csvCell(value: unknown): string {
+  const text = String(value ?? "");
+  return /[",\r\n;]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function downloadTextFile(filename: string, text: string, mime = "text/csv;charset=utf-8"): void {
+  const blob = new Blob(["\uFEFF", text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function exportRankingCsv(): void {
+  const rows = getDiffRows();
+  const headers = [
+    "rank", "player_id", "player_name", "level", "eu", "marks",
+    "t5", "rating", "reference_rating", "delta_rating", "delta_rank", "tournaments_count",
+  ];
+  const lines = [
+    headers.join(","),
+    ...rows.map((x) => [
+      x.rank, x.playerId, x.playerName, x.level, x.currentEu, x.marks,
+      x.t5.toFixed(4), x.rating.toFixed(4),
+      Number.isFinite(x.refRating) ? x.refRating.toFixed(4) : "",
+      Number.isFinite(x.deltaRating) ? x.deltaRating.toFixed(4) : "",
+      x.deltaRank, x.tournamentsCount,
+    ].map(csvCell).join(",")),
+  ];
+  const date = byId<HTMLInputElement>("evaluationDate")?.value || todayIso();
+  downloadTextFile(`mcr-rating-${date}.csv`, lines.join("\r\n"));
+}
+
+function deltaMiniTable(title: string, rows: DiffRow[], kind: "positive" | "negative"): string {
+  return `
+    <div class="delta-card ${kind}">
+      <div class="delta-card-title">${esc(title)}</div>
+      <table class="delta-table">
+        <thead><tr><th>Игрок</th><th>Δ Rating</th><th>Δ место</th></tr></thead>
+        <tbody>
+          ${rows.map((x) => `<tr>
+            <td>
+              <button class="player-link mini-player-link" data-player-id="${esc(x.playerId)}" type="button">
+                ${esc(x.playerName)}
+              </button>
+            </td>
+            <td class="${x.deltaRating > 0 ? "pos" : x.deltaRating < 0 ? "neg" : ""}">
+              ${x.deltaRating > 0 ? "+" : ""}${fmt(x.deltaRating)}
+            </td>
+            <td class="${x.deltaRank > 0 ? "pos" : x.deltaRank < 0 ? "neg" : ""}">
+              ${x.deltaRank > 0 ? "+" : ""}${x.deltaRank}
+            </td>
+          </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function playerDetailHtml(playerId: string): string {
+  if (!current) return "";
+
+  const rankingRow = current.ranking.find((x) => x.playerId === playerId);
+  if (!rankingRow) return "";
+
+  const rows = current.tournamentRows
+    .filter((x) => x.playerId === playerId)
+    .sort((a, b) =>
+      b.tournamentDate.localeCompare(a.tournamentDate)
+      || b.nrktvt - a.nrktvt
+    );
+
+  const topIds = new Set(
+    [...rows]
+      .sort((a, b) => b.nrktvt - a.nrktvt)
+      .slice(0, currentConfig.topN)
+      .map((x) => `${x.tournamentId}|${x.tournamentDate}`)
+  );
+
+  if (!rows.length) {
+    return `<div class="player-detail-empty">У игрока нет турнирных результатов в текущем наборе данных.</div>`;
+  }
+
+  return `
+    <div class="player-detail">
+      <div class="player-detail-head">
+        <div>
+          <strong>${esc(rankingRow.playerName)}</strong>
+          <span>${esc(rankingRow.level)} · EU ${rankingRow.currentEu} · T5 ${fmt(rankingRow.t5, 1)}</span>
+        </div>
+        <span class="micro">${rows.length} турниров · ★ входит в top-${currentConfig.topN}</span>
+      </div>
+      <div class="table-wrap player-history-wrap">
+        <table class="player-history-table">
+          <thead><tr>
+            <th></th>
+            <th>Дата</th>
+            <th>Турнир</th>
+            <th>Место</th>
+            <th>ЧУТ</th>
+            <th>Сессии</th>
+            <th>EU до</th>
+            <th>EU после</th>
+            <th>Уровень после</th>
+            <th>NR</th>
+            <th>KT</th>
+            <th>VT</th>
+            <th>NR·KT</th>
+            <th>NR·KT·VT</th>
+          </tr></thead>
+          <tbody>
+            ${rows.map((x) => {
+              const top = topIds.has(`${x.tournamentId}|${x.tournamentDate}`);
+              return `<tr class="${top ? "top-contribution" : ""}">
+                <td class="top-marker">${top ? "★" : ""}</td>
+                <td>${esc(x.tournamentDate)}</td>
+                <td class="tournament-name-cell" title="${esc(x.tournamentName)}">${esc(x.tournamentName)}</td>
+                <td>${x.place}</td>
+                <td>${x.participants}</td>
+                <td>${x.sessions}</td>
+                <td>${x.euBefore}</td>
+                <td>${x.euAfter}</td>
+                <td>${esc(x.levelAfter)}</td>
+                <td>${fmt(x.nr, 1)}</td>
+                <td>${fmt(x.kt)}</td>
+                <td>${fmt(x.vt)}</td>
+                <td>${fmt(x.nrkt, 1)}</td>
+                <td class="emph">${fmt(x.nrktvt, 1)}</td>
+              </tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function bindRankingInteractions(): void {
+  document.querySelectorAll<HTMLButtonElement>("[data-sort-key]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const key = button.dataset.sortKey as RankingSortKey;
+      if (rankingSortKey === key) {
+        rankingSortDir = rankingSortDir === "asc" ? "desc" : "asc";
+      } else {
+        rankingSortKey = key;
+        rankingSortDir = key === "playerName" || key === "level" ? "asc" : "desc";
+      }
+      renderOutput();
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-player-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const playerId = button.dataset.playerId!;
+      expandedPlayerId = expandedPlayerId === playerId ? null : playerId;
+      renderOutput();
+
+      if (expandedPlayerId) {
+        requestAnimationFrame(() => {
+          document
+            .querySelector(`[data-expanded-player="${CSS.escape(expandedPlayerId!)}"]`)
+            ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        });
+      }
+    });
+  });
+}
+
 function renderOutput(): void {
   if (!current || !reference) return;
 
   syncAllControlValues();
 
-  const refById = new Map(reference.ranking.map((x) => [x.playerId, x]));
-  const diffs = current.ranking.map((x) => {
-    const ref = refById.get(x.playerId);
-    return {
-      ...x,
-      refRating: ref?.rating ?? NaN,
-      deltaRating: ref ? x.rating - ref.rating : NaN,
-      deltaRank: ref ? ref.rank - x.rank : 0,
-    };
-  });
-
+  const diffs = getDiffRows();
   const changed = diffs.filter((x) => x.deltaRank !== 0).length;
   const validDelta = diffs.map((x) => x.deltaRating).filter(Number.isFinite);
   const meanAbs = validDelta.length
@@ -679,38 +926,96 @@ function renderOutput(): void {
   metrics.innerHTML = [
     ["Изменили место", changed],
     ["Среднее |Δ|", fmt(meanAbs)],
-    ["Макс. рост", `+${fmt(maxUp)}`],
+    ["Макс. рост", `${maxUp >= 0 ? "+" : ""}${fmt(maxUp)}`],
     ["Макс. падение", fmt(maxDown)],
   ].map(([k, v]) =>
     `<div class="metric-chip"><span>${k}</span><strong>${v}</strong></div>`
   ).join("");
 
+  const positive = [...diffs]
+    .filter((x) => Number.isFinite(x.deltaRating) && x.deltaRating > 0)
+    .sort((a, b) => b.deltaRating - a.deltaRating)
+    .slice(0, 5);
+  const negative = [...diffs]
+    .filter((x) => Number.isFinite(x.deltaRating) && x.deltaRating < 0)
+    .sort((a, b) => a.deltaRating - b.deltaRating)
+    .slice(0, 5);
+
+  const deltaLeaders = document.querySelector<HTMLDivElement>("#deltaLeaders")!;
+  deltaLeaders.innerHTML =
+    deltaMiniTable("Наибольший рост", positive, "positive")
+    + deltaMiniTable("Наибольшее падение", negative, "negative");
+
+  const query = rankingSearch.trim().toLocaleLowerCase("ru");
+  const filtered = diffs.filter((x) => {
+    if (!query) return true;
+    return [
+      x.playerName,
+      x.playerId,
+      x.level,
+      String(x.currentEu),
+      String(x.rank),
+    ].some((value) => String(value).toLocaleLowerCase("ru").includes(query));
+  });
+  const shown = sortRankingRows(filtered);
+
+  const countEl = document.querySelector<HTMLElement>("#rankingVisibleCount");
+  if (countEl) {
+    countEl.textContent = query
+      ? `Показано ${shown.length} из ${diffs.length}`
+      : `${diffs.length} игроков`;
+  }
+
   document.querySelector("#ranking")!.innerHTML = `
     <div class="table-wrap ranking-wrap">
       <table class="ranking-table">
         <thead><tr>
-          <th>#</th><th>Игрок</th><th>Уровень</th><th>EU</th><th>T5</th>
-          <th>Rating</th><th>Эталон</th><th>Δ Rating</th><th>Δ место</th>
+          ${sortHeader("#", "rank", "rank-col")}
+          ${sortHeader("Игрок", "playerName", "player-col")}
+          ${sortHeader("Уровень", "level")}
+          ${sortHeader("EU", "currentEu")}
+          ${sortHeader("T5", "t5")}
+          ${sortHeader("Rating", "rating")}
+          ${sortHeader("Эталон", "refRating")}
+          ${sortHeader("Δ Rating", "deltaRating")}
+          ${sortHeader("Δ место", "deltaRank")}
         </tr></thead>
         <tbody>
-          ${diffs.map((x) => `<tr>
-            <td>${x.rank}</td>
-            <td>${esc(x.playerName)}</td>
-            <td>${esc(x.level)}</td>
-            <td>${x.currentEu}</td>
-            <td>${fmt(x.t5, 1)}</td>
-            <td class="emph">${fmt(x.rating)}</td>
-            <td>${fmt(x.refRating)}</td>
-            <td class="${x.deltaRating > 0 ? "pos" : x.deltaRating < 0 ? "neg" : ""}">
-              ${x.deltaRating >= 0 ? "+" : ""}${fmt(x.deltaRating)}
-            </td>
-            <td class="${x.deltaRank > 0 ? "pos" : x.deltaRank < 0 ? "neg" : ""}">
-              ${x.deltaRank >= 0 ? "+" : ""}${x.deltaRank}
-            </td>
-          </tr>`).join("")}
+          ${shown.length ? shown.map((x) => `
+            <tr class="${expandedPlayerId === x.playerId ? "expanded-player-row" : ""}">
+              <td>${x.rank}</td>
+              <td class="player-name-cell">
+                <button class="player-link" data-player-id="${esc(x.playerId)}" type="button"
+                  title="${esc(x.playerName)}">
+                  <span>${esc(x.playerName)}</span>
+                  <span class="player-expand-icon">${expandedPlayerId === x.playerId ? "▾" : "›"}</span>
+                </button>
+              </td>
+              <td>${esc(x.level)}</td>
+              <td>${x.currentEu}</td>
+              <td>${fmt(x.t5, 1)}</td>
+              <td class="emph">${fmt(x.rating)}</td>
+              <td>${fmt(x.refRating)}</td>
+              <td class="${x.deltaRating > 0 ? "pos" : x.deltaRating < 0 ? "neg" : ""}">
+                ${x.deltaRating >= 0 ? "+" : ""}${fmt(x.deltaRating)}
+              </td>
+              <td class="${x.deltaRank > 0 ? "pos" : x.deltaRank < 0 ? "neg" : ""}">
+                ${x.deltaRank >= 0 ? "+" : ""}${x.deltaRank}
+              </td>
+            </tr>
+            ${expandedPlayerId === x.playerId ? `
+              <tr class="player-detail-row" data-expanded-player="${esc(x.playerId)}">
+                <td colspan="9">${playerDetailHtml(x.playerId)}</td>
+              </tr>
+            ` : ""}
+          `).join("") : `
+            <tr class="empty-ranking-row"><td colspan="9">По этому запросу игроков не найдено.</td></tr>
+          `}
         </tbody>
       </table>
     </div>`;
+
+  bindRankingInteractions();
 }
 
 async function loadFiles(): Promise<void> {
