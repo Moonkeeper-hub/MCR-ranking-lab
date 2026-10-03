@@ -41,6 +41,7 @@ type RankingSortKey =
   | "playerName"
   | "level"
   | "currentEu"
+  | "tournamentsCount"
   | "t5"
   | "rating"
   | "refRating"
@@ -1127,6 +1128,7 @@ function renderOutput(): void {
           ${sortHeader("Игрок", "playerName", "player-col")}
           ${sortHeader("Уровень", "level")}
           ${sortHeader("EU", "currentEu")}
+          ${sortHeader("Турниров", "tournamentsCount")}
           ${sortHeader("T5", "t5")}
           ${sortHeader("Rating", "rating")}
           ${sortHeader("Эталон", "refRating")}
@@ -1146,6 +1148,7 @@ function renderOutput(): void {
               </td>
               <td>${esc(x.level)}</td>
               <td>${x.currentEu}</td>
+              <td>${x.tournamentsCount}</td>
               <td>${fmt(x.t5, 1)}</td>
               <td class="emph">${fmt(x.rating)}</td>
               <td>${fmt(x.refRating)}</td>
@@ -1158,11 +1161,11 @@ function renderOutput(): void {
             </tr>
             ${expandedPlayerId === x.playerId ? `
               <tr class="player-detail-row" data-expanded-player="${esc(x.playerId)}">
-                <td colspan="9">${playerDetailHtml(x.playerId)}</td>
+                <td colspan="10">${playerDetailHtml(x.playerId)}</td>
               </tr>
             ` : ""}
           `).join("") : `
-            <tr class="empty-ranking-row"><td colspan="9">По этому запросу игроков не найдено.</td></tr>
+            <tr class="empty-ranking-row"><td colspan="10">По этому запросу игроков не найдено.</td></tr>
           `}
         </tbody>
       </table>
@@ -1476,7 +1479,7 @@ function renderHistorySnapshot(): void {
         <div class="table-wrap snapshot-ranking-wrap">
           <table class="ranking-table snapshot-ranking-table">
             <thead><tr>
-              <th>#</th><th class="player-col">Игрок</th><th>Уровень</th><th>EU</th><th>T5</th>
+              <th>#</th><th class="player-col">Игрок</th><th>Уровень</th><th>EU</th><th>Турниров</th><th>T5</th>
               <th>Rating</th><th>Эталон</th><th>Δ Rating</th><th>Δ место</th>
             </tr></thead>
             <tbody>
@@ -1498,6 +1501,7 @@ function renderHistorySnapshot(): void {
                     </td>
                     <td>${esc(row.level)}</td>
                     <td>${row.currentEu}</td>
+                    <td>${row.tournamentsCount}</td>
                     <td>${fmt(row.t5, 1)}</td>
                     <td class="emph">${fmt(row.rating)}</td>
                     <td>${ref ? fmt(ref.rating) : "—"}</td>
@@ -1510,7 +1514,7 @@ function renderHistorySnapshot(): void {
                   </tr>
                   ${expanded ? `
                     <tr class="player-detail-row" data-history-expanded-player="${esc(row.playerId)}">
-                      <td colspan="9">${playerDetailHtml(row.playerId, snapshot.result, currentConfig.topN)}</td>
+                      <td colspan="10">${playerDetailHtml(row.playerId, snapshot.result, currentConfig.topN)}</td>
                     </tr>
                   ` : ""}
                 `;
