@@ -1020,3 +1020,90 @@ td.neg { color: var(--negative); }
     grid-template-columns: 1fr;
   }
 }
+
+
+/* v0.25 — demo dataset, support button, reusable history drilldown */
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.support-wrap {
+  position: relative;
+}
+
+.support-button {
+  white-space: nowrap;
+  font-size: 11px;
+  padding: 5px 9px;
+}
+
+.support-popover {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 7px);
+  right: 0;
+  width: 290px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 8px 24px rgba(0,0,0,.15);
+}
+
+.support-popover[hidden] {
+  display: none;
+}
+
+.support-popover > strong,
+.support-popover > span {
+  display: block;
+}
+
+.support-popover > span {
+  color: var(--muted);
+  font-size: 10.5px;
+  margin-top: 3px;
+}
+
+.support-number-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.support-number-row code {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.support-number-row button {
+  padding: 4px 7px;
+  font-size: 10.5px;
+}
+
+.snapshot-grid {
+  grid-template-columns: minmax(280px, .55fr) minmax(620px, 1.45fr);
+}
+
+.snapshot-ranking-wrap {
+  max-height: 520px;
+}
+
+.snapshot-ranking-table {
+  min-width: 860px;
+}
+
+@media (max-width: 720px) {
+  .topbar-actions {
+    align-items: flex-end;
+    flex-direction: column;
+  }
+
+  .support-popover {
+    width: min(290px, 85vw);
+  }
+}

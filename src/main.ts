@@ -32,7 +32,7 @@ let useKtExperiment = false;
 let useVtExperiment = false;
 let current: CalculationResult | null = null;
 let reference: CalculationResult | null = null;
-let dataLabel = "встроенный RR/offline dataset";
+let dataLabel = "встроенный demo dataset";
 let activeFormulaToken: string | null = null;
 let activeReferenceTab = 0;
 
@@ -58,6 +58,7 @@ let historySnapshots: RatingSnapshot[] = [];
 let historyReferenceSnapshots: RatingSnapshot[] = [];
 let historySnapshotIndex = 0;
 let historyPlayerId: string | null = null;
+let historyExpandedPlayerId: string | null = null;
 let historyDirty = true;
 
 
@@ -205,9 +206,23 @@ function renderShell(): void {
       <header class="topbar">
         <div>
           <h1>MCR Rating Lab</h1>
-          <div class="subtitle">v0.24 · TypeScript · расчёт выполняется в браузере</div>
+          <div class="subtitle">v0.25 · TypeScript · расчёт выполняется в браузере</div>
         </div>
-        <div class="privacy-pill">CSV остаются на устройстве пользователя</div>
+        <div class="topbar-actions">
+          <div class="privacy-pill">CSV остаются на устройстве пользователя</div>
+          <div class="support-wrap">
+            <button id="supportButton" class="support-button" type="button">Donate / Support</button>
+            <div id="supportPopover" class="support-popover" hidden>
+              <strong>Поддержать проект</strong>
+              <span>Перевод по номеру телефона на Сбербанк</span>
+              <div class="support-number-row">
+                <code>+7 967 087 1525</code>
+                <button id="copySupportNumber" type="button">Копировать</button>
+              </div>
+              <span id="supportCopyStatus" class="micro"></span>
+            </div>
+          </div>
+        </div>
       </header>
 
       <nav class="workspace-tabs" aria-label="Режим работы">
@@ -233,7 +248,7 @@ function renderShell(): void {
                 <label class="file-row">results.csv <input id="resultsFile" type="file" accept=".csv,text/csv"></label>
                 <div class="button-row">
                   <button id="loadFiles" class="primary">Загрузить</button>
-                  <button id="loadBuiltin">RR dataset</button>
+                  <button id="loadBuiltin">Demo dataset</button>
                 </div>
                 <div id="status" class="micro"></div>
               </div>
@@ -436,6 +451,21 @@ function renderShell(): void {
   byId("workspaceLab").addEventListener("click", () => setWorkspace("lab"));
   byId("workspaceHistory").addEventListener("click", () => setWorkspace("history"));
 
+  byId("supportButton").addEventListener("click", () => {
+    const popover = byId<HTMLDivElement>("supportPopover");
+    popover.hidden = !popover.hidden;
+  });
+
+  byId("copySupportNumber").addEventListener("click", async () => {
+    const value = "+7 967 087 1525";
+    try {
+      await navigator.clipboard.writeText(value);
+      byId("supportCopyStatus").textContent = "Номер скопирован";
+    } catch {
+      byId("supportCopyStatus").textContent = value;
+    }
+  });
+
   byId<HTMLSelectElement>("historyInitialMode").addEventListener("change", (e) => {
     historyInitialMode = (e.currentTarget as HTMLSelectElement).value as InitialStateMode;
     historyDirty = true;
@@ -445,6 +475,7 @@ function renderShell(): void {
 
   byId<HTMLInputElement>("historySlider").addEventListener("input", (e) => {
     historySnapshotIndex = Number((e.currentTarget as HTMLInputElement).value);
+    historyExpandedPlayerId = null;
     renderHistorySnapshot();
   });
 
@@ -892,13 +923,17 @@ function deltaMiniTable(title: string, rows: DiffRow[], kind: "positive" | "nega
     </div>`;
 }
 
-function playerDetailHtml(playerId: string): string {
-  if (!current) return "";
+function playerDetailHtml(
+  playerId: string,
+  result: CalculationResult = current!,
+  topN = currentConfig.topN,
+): string {
+  if (!result) return "";
 
-  const rankingRow = current.ranking.find((x) => x.playerId === playerId);
+  const rankingRow = result.ranking.find((x) => x.playerId === playerId);
   if (!rankingRow) return "";
 
-  const rows = current.tournamentRows
+  const rows = result.tournamentRows
     .filter((x) => x.playerId === playerId)
     .sort((a, b) =>
       b.tournamentDate.localeCompare(a.tournamentDate)
@@ -908,7 +943,7 @@ function playerDetailHtml(playerId: string): string {
   const topIds = new Set(
     [...rows]
       .sort((a, b) => b.nrktvt - a.nrktvt)
-      .slice(0, currentConfig.topN)
+      .slice(0, topN)
       .map((x) => `${x.tournamentId}|${x.tournamentDate}`)
   );
 
@@ -923,7 +958,7 @@ function playerDetailHtml(playerId: string): string {
           <strong>${esc(rankingRow.playerName)}</strong>
           <span>${esc(rankingRow.level)} · EU ${rankingRow.currentEu} · T5 ${fmt(rankingRow.t5, 1)}</span>
         </div>
-        <span class="micro">${rows.length} турниров · ★ входит в top-${currentConfig.topN}</span>
+        <span class="micro">${rows.length} турниров · ★ входит в top-${topN}</span>
       </div>
       <div class="table-wrap player-history-wrap">
         <table class="player-history-table">
@@ -968,7 +1003,6 @@ function playerDetailHtml(playerId: string): string {
       </div>
     </div>`;
 }
-
 function bindRankingInteractions(): void {
   document.querySelectorAll<HTMLButtonElement>("[data-sort-key]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -1219,6 +1253,7 @@ function renderHistoryWorkspace(): void {
   ticks.querySelectorAll<HTMLButtonElement>("[data-history-index]").forEach((button) => {
     button.addEventListener("click", () => {
       historySnapshotIndex = Number(button.dataset.historyIndex);
+      historyExpandedPlayerId = null;
       slider.value = String(historySnapshotIndex);
       renderHistoryWorkspace();
     });
@@ -1412,19 +1447,46 @@ function renderHistorySnapshot(): void {
       <div>
         <div class="snapshot-subtitle">Рейтинг после этого шага</div>
         <div class="table-wrap snapshot-ranking-wrap">
-          <table class="snapshot-table">
-            <thead><tr><th>#</th><th>Игрок</th><th>EU</th><th>T5</th><th>Rating</th><th>Ref #</th></tr></thead>
+          <table class="ranking-table snapshot-ranking-table">
+            <thead><tr>
+              <th>#</th><th class="player-col">Игрок</th><th>Уровень</th><th>EU</th><th>T5</th>
+              <th>Rating</th><th>Эталон</th><th>Δ Rating</th><th>Δ место</th>
+            </tr></thead>
             <tbody>
-              ${snapshot.result.ranking.slice(0, 25).map((row) => {
+              ${snapshot.result.ranking.map((row) => {
                 const ref = refById.get(row.playerId);
-                return `<tr>
-                  <td>${row.rank}</td>
-                  <td>${esc(row.playerName)}</td>
-                  <td>${row.currentEu}</td>
-                  <td>${fmt(row.t5, 1)}</td>
-                  <td class="emph">${fmt(row.rating)}</td>
-                  <td>${ref ? `#${ref.rank}` : "—"}</td>
-                </tr>`;
+                const deltaRating = ref ? row.rating - ref.rating : Number.NaN;
+                const deltaRank = ref ? ref.rank - row.rank : 0;
+                const expanded = historyExpandedPlayerId === row.playerId;
+                return `
+                  <tr class="${expanded ? "expanded-player-row" : ""}">
+                    <td>${row.rank}</td>
+                    <td class="player-name-cell">
+                      <button class="player-link history-player-link"
+                        data-history-player-id="${esc(row.playerId)}"
+                        type="button" title="${esc(row.playerName)}">
+                        <span>${esc(row.playerName)}</span>
+                        <span class="player-expand-icon">${expanded ? "▾" : "›"}</span>
+                      </button>
+                    </td>
+                    <td>${esc(row.level)}</td>
+                    <td>${row.currentEu}</td>
+                    <td>${fmt(row.t5, 1)}</td>
+                    <td class="emph">${fmt(row.rating)}</td>
+                    <td>${ref ? fmt(ref.rating) : "—"}</td>
+                    <td class="${deltaRating > 0 ? "pos" : deltaRating < 0 ? "neg" : ""}">
+                      ${Number.isFinite(deltaRating) ? `${deltaRating >= 0 ? "+" : ""}${fmt(deltaRating)}` : "—"}
+                    </td>
+                    <td class="${deltaRank > 0 ? "pos" : deltaRank < 0 ? "neg" : ""}">
+                      ${ref ? `${deltaRank >= 0 ? "+" : ""}${deltaRank}` : "—"}
+                    </td>
+                  </tr>
+                  ${expanded ? `
+                    <tr class="player-detail-row" data-history-expanded-player="${esc(row.playerId)}">
+                      <td colspan="9">${playerDetailHtml(row.playerId, snapshot.result, currentConfig.topN)}</td>
+                    </tr>
+                  ` : ""}
+                `;
               }).join("")}
             </tbody>
           </table>
@@ -1432,6 +1494,24 @@ function renderHistorySnapshot(): void {
       </div>
     </div>
   `;
+
+  byId("historySnapshotPanel")
+    .querySelectorAll<HTMLButtonElement>("[data-history-player-id]")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        const playerId = button.dataset.historyPlayerId!;
+        historyExpandedPlayerId = historyExpandedPlayerId === playerId ? null : playerId;
+        renderHistorySnapshot();
+
+        if (historyExpandedPlayerId) {
+          requestAnimationFrame(() => {
+            document
+              .querySelector(`[data-history-expanded-player="${CSS.escape(historyExpandedPlayerId!)}"]`)
+              ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+          });
+        }
+      });
+    });
 
   renderHistoryPlayerChart();
 }
@@ -1460,12 +1540,12 @@ async function loadBuiltin(): Promise<void> {
   try {
     setStatus("Загрузка встроенного набора…", true);
     const data = await loadCsvPair(
-      "/data/players_riichi_rr.csv",
-      "/data/results_riichi_rr.csv",
+      "/data/players_demo.csv",
+      "/data/results_demo.csv",
     );
     players = data.players;
     results = data.results;
-    dataLabel = "встроенный RR/offline dataset";
+    dataLabel = "встроенный demo dataset";
     byId("dataLabel").textContent = dataLabel;
     recalc();
   } catch (error) {
