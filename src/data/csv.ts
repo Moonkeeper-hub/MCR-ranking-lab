@@ -49,8 +49,21 @@ export function playersFromCsv(text: string): PlayerInput[] {
 
 export function resultsFromCsv(text: string): ResultInput[] {
   const rows = parseCsv(text);
-  const required = ["tournament_id", "tournament_name", "tournament_date", "player_id", "place", "participants", "sessions", "is_world_europe"];
-  for (const key of required) if (rows.length && !(key in rows[0])) throw new Error(`results.csv: нет колонки ${key}`);
+  const required = ["tournament_id", "tournament_name", "tournament_date", "player_id", "place", "participants", "sessions"];
+  for (const key of required) {
+    if (rows.length && !(key in rows[0])) {
+      throw new Error(`results.csv: нет колонки ${key}`);
+    }
+  }
+
+  if (
+    rows.length
+    && !("is_status_tournament" in rows[0])
+    && !("is_world_europe" in rows[0])
+  ) {
+    throw new Error("results.csv: нет колонки is_status_tournament");
+  }
+
   return rows.map((r) => ({
     ...r,
     tournament_id: String(r.tournament_id),
@@ -61,7 +74,8 @@ export function resultsFromCsv(text: string): ResultInput[] {
     place: Number(r.place),
     participants: Number(r.participants),
     sessions: Number(r.sessions),
-    is_world_europe: asBool(r.is_world_europe),
+    is_status_tournament: asBool(r.is_status_tournament ?? r.is_world_europe),
+    is_substitute: asBool(r.is_substitute),
   }));
 }
 

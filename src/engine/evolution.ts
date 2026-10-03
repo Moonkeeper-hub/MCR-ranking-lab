@@ -1,8 +1,13 @@
 import { EU_TO_LEVEL, LEVEL_VALUES } from "./legacyTables";
-import type { EvolutionState, LegacyConfig } from "./types";
+import type { EvolutionState, Mcr2026Config } from "./types";
 
 export function cloneState(state: EvolutionState): EvolutionState {
-  return { eu: state.eu, marks: state.marks, danDate: state.danDate ? new Date(state.danDate) : null };
+  return {
+    eu: state.eu,
+    marks: state.marks,
+    danDate: state.danDate ? new Date(state.danDate) : null,
+    expiryPeriodsApplied: state.expiryPeriodsApplied,
+  };
 }
 
 export function performedNorm(value: number): number {
@@ -34,26 +39,32 @@ function addMonths(date: Date, months: number): Date {
 }
 
 export class EvolutionEngine {
-  constructor(private readonly config: LegacyConfig) {}
+  constructor(private readonly config: Mcr2026Config) {}
 
   normalizeMarks(state: EvolutionState): EvolutionState {
     while (state.marks >= this.config.successesPerStep) {
       if (state.eu < 7500) state.eu = Math.min(7500, state.eu + this.config.danStep);
       state.marks -= this.config.successesPerStep;
     }
+
     while (state.marks <= -this.config.failuresPerStep) {
       if (state.eu > this.config.protectedEu) {
         state.eu = Math.max(this.config.protectedEu, state.eu - this.config.danStep);
       }
       state.marks += this.config.failuresPerStep;
     }
+
     if (state.eu <= this.config.protectedEu && state.marks < 0) state.marks = 0;
-    if (state.eu < 2500) state.danDate = null;
+    if (state.eu < this.config.protectedEu) {
+      state.danDate = null;
+      state.expiryPeriodsApplied = 0;
+    }
     return state;
   }
 
   addSuccesses(state: EvolutionState, count: number): EvolutionState {
     for (let i = 0; i < Math.max(0, Math.trunc(count)); i += 1) {
+      // Positive and negative marks cancel arithmetically.
       state.marks += 1;
       this.normalizeMarks(state);
     }
@@ -65,51 +76,94 @@ export class EvolutionEngine {
     return this.normalizeMarks(state);
   }
 
-  expireUntil(state: EvolutionState, targetDate: Date): EvolutionState {
+  /**
+   * Appendix 3 inactivity rule.
+   * Call this only for players who do NOT participate in the tournament
+   * currently being processed.
+   *
+   * danDate remains the last tournament where EU_before <= NR * KT was met.
+   * expiryPeriodsApplied prevents the same anniversary from being charged
+   * repeatedly at every later tournament.
+   */
+  applyInactivity(state: EvolutionState, targetDate: Date): EvolutionState {
     if (state.eu < 2500 || !state.danDate) return state;
-    let nextDue = addMonths(state.danDate, this.config.confirmationMonths);
-    while (nextDue <= targetDate && state.eu >= 2500 && state.danDate) {
+
+    // Appendix 3 defines two milestones relative to the last successful
+    // tournament: one minus after >1 year, and one-rank demotion after >=2
+    // years (implemented as the second minus). It does not define further
+    // automatic annual demotions, so only these two periods are applied.
+    while (state.eu >= 2500 && state.expiryPeriodsApplied < 2) {
+      const nextPeriod = state.expiryPeriodsApplied + 1;
+      const due = addMonths(
+        state.danDate,
+        nextPeriod * this.config.confirmationMonths,
+      );
+
+      // First milestone: strictly more than one year.
+      // Second milestone: two years or more.
+      const reached = nextPeriod === 1
+        ? targetDate > due
+        : targetDate >= due;
+      if (!reached) break;
+
       this.addFailure(state);
-      if (state.eu >= 2500) {
-        state.danDate = nextDue;
-        nextDue = addMonths(state.danDate, this.config.confirmationMonths);
-      } else {
-        state.danDate = null;
-      }
+      state.expiryPeriodsApplied = nextPeriod;
     }
+
     return state;
   }
 
+  /**
+   * Applies one positive-rank calculation for a tournament.
+   *
+   * For 1 kyu and below, the player immediately receives the rank whose EU
+   * is the nearest value not exceeding NR*KT.
+   *
+   * For 1 dan and above, floor((NR*KT - EU_before) / 500) pluses are earned.
+   * Existing minuses are not erased first: pluses and minuses cancel.
+   */
   processPerformance(
     state: EvolutionState,
     performance: number,
     tournamentDate: Date,
-    processedNorm = 0,
-  ): { state: EvolutionState; processedNorm: number; norm: number; successesAdded: number } {
-    const norm = performedNorm(performance);
+  ): { state: EvolutionState; norm: number; successesAdded: number; conditionMet: boolean } {
     const before = cloneState(state);
+    const norm = performedNorm(performance);
+    const conditionMet = before.eu <= performance;
     let successCount = 0;
 
-    const permanent = Math.min(norm, this.config.protectedEu);
-    if (permanent > state.eu) {
-      state.eu = permanent;
+    if (!conditionMet) {
+      return { state, norm, successesAdded: 0, conditionMet: false };
+    }
+
+    if (before.eu <= 1750) {
+      state.eu = norm;
       state.marks = 0;
-      if (state.eu < 2500) state.danDate = null;
+      if (state.eu >= 2000) {
+        state.danDate = tournamentDate;
+        state.expiryPeriodsApplied = 0;
+      } else {
+        state.danDate = null;
+        state.expiryPeriodsApplied = 0;
+      }
+      return { state, norm, successesAdded: 0, conditionMet: true };
     }
 
-    if (state.eu >= 2500 && norm >= state.eu) {
-      if (state.marks < 0) state.marks = 0;
+    // 1 dan and above: pluses are calculated from the raw NR*KT excess.
+    successCount = Math.max(
+      0,
+      Math.floor((performance - before.eu) / this.config.danStep),
+    );
+
+    this.addSuccesses(state, successCount);
+
+    // The condition itself, even if it yields zero pluses, confirms the dan.
+    if (state.eu >= 2000) {
       state.danDate = tournamentDate;
-    }
-
-    const startThreshold = Math.max(this.config.protectedEu, before.eu, processedNorm);
-    if (norm > startThreshold) {
-      successCount = Math.max(0, Math.floor((norm - startThreshold) / this.config.danStep));
-      this.addSuccesses(state, successCount);
-      if (state.eu >= 2500) state.danDate = tournamentDate;
+      state.expiryPeriodsApplied = 0;
     }
 
     this.normalizeMarks(state);
-    return { state, processedNorm: Math.max(processedNorm, norm), norm, successesAdded: successCount };
+    return { state, norm, successesAdded: successCount, conditionMet: true };
   }
 }

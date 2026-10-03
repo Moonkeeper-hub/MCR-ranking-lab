@@ -3,6 +3,10 @@ export interface PlayerInput {
   player_name: string;
   initial_eu?: number;
   initial_marks?: number;
+  /**
+   * Date of the last tournament before the imported history where
+   * EU_before <= NR * KT was satisfied.
+   */
   initial_dan_date?: string;
   [key: string]: string | number | boolean | undefined;
 }
@@ -16,17 +20,26 @@ export interface ResultInput {
   place: number;
   participants: number;
   sessions: number;
-  is_world_europe: boolean;
+  is_status_tournament: boolean;
+  is_substitute?: boolean;
+  /** Deprecated input alias accepted by the CSV parser. */
+  is_world_europe?: boolean;
   [key: string]: string | number | boolean | undefined;
 }
 
 export interface EvolutionState {
   eu: number;
   marks: number;
+  /** Last tournament date where EU_before <= NR * KT was satisfied. */
   danDate: Date | null;
+  /** Number of inactivity periods already applied since danDate. */
+  expiryPeriodsApplied: number;
 }
 
-export interface LegacyConfig {
+export type DoubleStrikeMode = "none" | "A" | "B";
+export type SubstituteEuPolicy = "zero" | "average" | "newcomer";
+
+export interface Mcr2026Config {
   euWeight: number;
   t5Weight: number;
   topN: number;
@@ -35,16 +48,16 @@ export interface LegacyConfig {
   euComponentScale: number;
   euNormalizer: number;
   euRoundStep: number;
-  worldEuropeBonus: number;
+  statusTournamentBonus: number;
   decayPerQuarter: number;
   maxAgeMonths: number;
-  doubleStrike: boolean;
+  doubleStrikeMode: DoubleStrikeMode;
+  substituteEuPolicy: SubstituteEuPolicy;
   successesPerStep: number;
   failuresPerStep: number;
   danStep: number;
   confirmationMonths: number;
   protectedEu: number;
-  capPlayerCountComponent: boolean;
 }
 
 export interface AgeWeight {
@@ -86,7 +99,7 @@ export interface TournamentDetail {
   ktSessions: number;
   ktPlayers: number;
   ktEu: number;
-  ktWorld: number;
+  ktStatus: number;
   kt: number;
   nr: number;
   vt: number;
@@ -98,7 +111,6 @@ export interface CalculationResult {
   ranking: RankingRow[];
   tournamentRows: TournamentDetail[];
 }
-
 
 export interface CalculationOptions {
   /**
@@ -118,7 +130,7 @@ export interface TournamentEvent {
   tournamentOrder: number;
   participants: number;
   sessions: number;
-  isWorldEurope: boolean;
+  isStatusTournament: boolean;
 }
 
 export interface RatingSnapshot {

@@ -1,6 +1,6 @@
 
 import katex from "katex";
-import type { LegacyConfig } from "../engine/types";
+import type { Mcr2026Config } from "../engine/types";
 
 function hotspot(tex: string, token: string): string {
   return String.raw`\htmlClass{formula-hotspot}{\htmlData{formula-token=${token}}{${tex}}}`;
@@ -20,14 +20,14 @@ function n(v: number, digits = 2): string {
   return Number(v).toFixed(digits);
 }
 
-export function renderLegacyMath(config: LegacyConfig): string {
+export function renderMcr2026Math(config: Mcr2026Config): string {
   const euW = n(config.euWeight);
   const t5W = n(config.t5Weight);
   const topN = String(config.topN);
   const session = n(config.sessionCoef);
   const euNorm = String(Math.round(config.euNormalizer));
   const euRound = n(config.euRoundStep);
-  const world = n(config.worldEuropeBonus);
+  const world = n(config.statusTournamentBonus);
 
   const rating = render(String.raw`
     \mathrm{Rating}

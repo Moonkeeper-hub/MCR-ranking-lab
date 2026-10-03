@@ -1,18 +1,18 @@
 
 import "./styles.css";
 import "katex/dist/katex.min.css";
-import { renderLegacyMath } from "./ui/formulas";
-import { LegacyEngine, defaultLegacyConfig } from "./engine/legacy";
-import { simulateLegacyHistory } from "./engine/simulation";
+import { renderMcr2026Math } from "./ui/formulas";
+import { Mcr2026Engine, defaultMcr2026Config } from "./engine/legacy";
+import { simulateMcr2026History } from "./engine/simulation";
 import {
   KT_PARTICIPANTS,
-  LEGACY_AGE_WEIGHTS,
-  LEGACY_LEVELS,
-  LEGACY_DEFAULTS,
+  MCR2026_AGE_WEIGHTS,
+  MCR2026_LEVELS,
+  MCR2026_DEFAULTS,
 } from "./engine/legacyTables";
 import type {
   CalculationResult,
-  LegacyConfig,
+  Mcr2026Config,
   PlayerInput,
   ResultInput,
   TableOverrides,
@@ -25,9 +25,9 @@ const app = document.querySelector<HTMLDivElement>("#app")!;
 
 let players: PlayerInput[] = [];
 let results: ResultInput[] = [];
-let currentConfig: LegacyConfig = defaultLegacyConfig();
+let currentConfig: Mcr2026Config = defaultMcr2026Config();
 let ktExperiment: Record<number, number> = { ...KT_PARTICIPANTS };
-let vtExperiment = LEGACY_AGE_WEIGHTS.map((x) => ({ ...x }));
+let vtExperiment = MCR2026_AGE_WEIGHTS.map((x) => ({ ...x }));
 let useKtExperiment = false;
 let useVtExperiment = false;
 let current: CalculationResult | null = null;
@@ -84,8 +84,8 @@ function recalc(): void {
   if (useVtExperiment) overrides.ageWeights = vtExperiment;
 
   try {
-    current = new LegacyEngine(currentConfig, overrides).calculate(players, results, evaluationDate);
-    reference = new LegacyEngine(defaultLegacyConfig()).calculate(players, results, evaluationDate);
+    current = new Mcr2026Engine(currentConfig, overrides).calculate(players, results, evaluationDate);
+    reference = new Mcr2026Engine(defaultMcr2026Config()).calculate(players, results, evaluationDate);
     historyDirty = true;
     syncAllControlValues();
     renderFormulaMath();
@@ -109,8 +109,8 @@ function setStatus(text: string, ok = true): void {
 }
 
 type NumericKey = {
-  [K in keyof LegacyConfig]: LegacyConfig[K] extends number ? K : never
-}[keyof LegacyConfig];
+  [K in keyof Mcr2026Config]: Mcr2026Config[K] extends number ? K : never
+}[keyof Mcr2026Config];
 
 interface ControlDef {
   key: NumericKey;
@@ -130,7 +130,7 @@ const CONTROL_DEFS: Record<string, ControlDef> = {
   euComponentScale: { key: "euComponentScale", label: "Масштаб KT_EU", min: 0, max: 2, step: .05 },
   euNormalizer: { key: "euNormalizer", label: "Нормализатор EU", min: 100, max: 3000, step: 50, digits: 0 },
   euRoundStep: { key: "euRoundStep", label: "Шаг округления KT_EU", min: 0, max: .25, step: .01 },
-  worldEuropeBonus: { key: "worldEuropeBonus", label: "Бонус ЧЕ/ЧМ", min: 0, max: 2, step: .05 },
+  statusTournamentBonus: { key: "statusTournamentBonus", label: "Бонус статусного турнира", min: 0, max: 2, step: .05 },
   decayPerQuarter: { key: "decayPerQuarter", label: "Снижение VT / квартал", min: 0, max: .25, step: .01 },
   maxAgeMonths: { key: "maxAgeMonths", label: "Обнуление VT после, мес.", min: 12, max: 72, step: 3, digits: 0 },
   successesPerStep: { key: "successesPerStep", label: "Успехов на повышение", min: 1, max: 5, step: 1, digits: 0 },
@@ -206,7 +206,7 @@ function renderShell(): void {
       <header class="topbar">
         <div>
           <h1>MCR Rating Lab</h1>
-          <div class="subtitle">v0.25 · TypeScript · расчёт выполняется в браузере</div>
+          <div class="subtitle">v0.26 · TypeScript · расчёт выполняется в браузере</div>
         </div>
         <div class="topbar-actions">
           <div class="privacy-pill">CSV остаются на устройстве пользователя</div>
@@ -272,7 +272,7 @@ function renderShell(): void {
                 ${controlHtml("euComponentScale", "side")}
                 ${controlHtml("euNormalizer", "side")}
                 ${controlHtml("euRoundStep", "side")}
-                ${controlHtml("worldEuropeBonus", "side")}
+                ${controlHtml("statusTournamentBonus", "side")}
               </div>
             </details>
 
@@ -286,11 +286,30 @@ function renderShell(): void {
 
             <details class="side-section">
               <summary>EU / даны</summary>
-              <div class="section-body">
-                <label class="switch-row">
-                  <input id="doubleStrike" type="checkbox" ${currentConfig.doubleStrike ? "checked" : ""}>
+              <div class="section-body compact-stack">
+                <label class="select-row">
                   <span>Double Strike</span>
+                  <select id="doubleStrikeMode">
+                    <option value="none" ${currentConfig.doubleStrikeMode === "none" ? "selected" : ""}>Нет</option>
+                    <option value="A" ${currentConfig.doubleStrikeMode === "A" ? "selected" : ""}>A — полный пересчёт</option>
+                    <option value="B" ${currentConfig.doubleStrikeMode === "B" ? "selected" : ""}>B — продолжение первой итерации</option>
+                  </select>
                 </label>
+                <div class="notice compact">
+                  <strong>A:</strong> первый проход нужен только для нового EU новичков; затем турнир пересчитывается с исходного состояния.
+                  <br><strong>B:</strong> второй проход продолжает первый и может добавить ещё один слой изменений.
+                </div>
+                <label class="select-row">
+                  <span>EU игрока замены</span>
+                  <select id="substituteEuPolicy">
+                    <option value="zero" ${currentConfig.substituteEuPolicy === "zero" ? "selected" : ""}>0</option>
+                    <option value="average" ${currentConfig.substituteEuPolicy === "average" ? "selected" : ""}>Среднее арифметическое</option>
+                    <option value="newcomer" ${currentConfig.substituteEuPolicy === "newcomer" ? "selected" : ""}>Считать новичком</option>
+                  </select>
+                </label>
+                <div class="micro">
+                  «Считать новичком» включает игрока замены в текущую политику Double Strike.
+                </div>
                 ${controlHtml("successesPerStep", "side")}
                 ${controlHtml("failuresPerStep", "side")}
                 ${controlHtml("danStep", "side")}
@@ -303,7 +322,7 @@ function renderShell(): void {
               <label class="date-row">Дата рейтинга
                 <input id="evaluationDate" type="date" value="${todayIso()}">
               </label>
-              <button id="resetConfig" class="full">Сбросить Legacy к default</button>
+              <button id="resetConfig" class="full">Сбросить MCR-2026 к default</button>
             </div>
           </section>
         </aside>
@@ -312,14 +331,14 @@ function renderShell(): void {
           <section class="formula-card">
             <div class="eyebrow-row">
               <div>
-                <div class="eyebrow">Legacy</div>
+                <div class="eyebrow">MCR-2026</div>
                 <div class="formula-caption">Основная формула и её компоненты</div>
               </div>
               <div class="formula-badge">интерактивная формула</div>
             </div>
 
             <div id="legacyFormulaMount" class="legacy-formula-mount">
-              ${renderLegacyMath(currentConfig)}
+              ${renderMcr2026Math(currentConfig)}
             </div>
 
             <div class="formula-hint">
@@ -330,7 +349,7 @@ function renderShell(): void {
 
           <details class="reference-card">
             <summary>
-              <span>Справочники Legacy — посмотреть и поиграть</span>
+              <span>Справочники MCR-2026 — посмотреть и поиграть</span>
               <span class="summary-note">канон + экспериментальные копии</span>
             </summary>
             <div class="reference-body">
@@ -344,8 +363,8 @@ function renderShell(): void {
               <div>
                 <h2>Рейтинговая таблица</h2>
                 <div class="reference-labels">
-                  <span>Текущая: <strong>Legacy</strong></span>
-                  <span>Эталон: <strong>Legacy default</strong></span>
+                  <span>Текущая: <strong>MCR-2026</strong></span>
+                  <span>Эталон: <strong>MCR-2026 default</strong></span>
                 </div>
               </div>
               <div id="metrics" class="metrics-strip"></div>
@@ -403,7 +422,7 @@ function renderShell(): void {
           <div class="history-player-toolbar">
             <div>
               <strong>Движение игрока</strong>
-              <span class="micro">экспериментальная Legacy против Legacy default</span>
+              <span class="micro">экспериментальная MCR-2026 против MCR-2026 default</span>
             </div>
             <select id="historyPlayerSelect"></select>
           </div>
@@ -420,18 +439,22 @@ function renderShell(): void {
   bindFormulaTokens();
 
   byId<HTMLInputElement>("evaluationDate").addEventListener("change", recalc);
-  byId<HTMLInputElement>("doubleStrike").addEventListener("change", (e) => {
-    currentConfig.doubleStrike = (e.currentTarget as HTMLInputElement).checked;
+  byId<HTMLSelectElement>("doubleStrikeMode").addEventListener("change", (e) => {
+    currentConfig.doubleStrikeMode = (e.currentTarget as HTMLSelectElement).value as Mcr2026Config["doubleStrikeMode"];
     recalc();
     if (activeFormulaToken === "DoubleStrike") renderFormulaInspector();
   });
+  byId<HTMLSelectElement>("substituteEuPolicy").addEventListener("change", (e) => {
+    currentConfig.substituteEuPolicy = (e.currentTarget as HTMLSelectElement).value as Mcr2026Config["substituteEuPolicy"];
+    recalc();
+  });
 
   byId("resetConfig").addEventListener("click", () => {
-    currentConfig = defaultLegacyConfig();
+    currentConfig = defaultMcr2026Config();
     useKtExperiment = false;
     useVtExperiment = false;
     ktExperiment = { ...KT_PARTICIPANTS };
-    vtExperiment = LEGACY_AGE_WEIGHTS.map((x) => ({ ...x }));
+    vtExperiment = MCR2026_AGE_WEIGHTS.map((x) => ({ ...x }));
     activeFormulaToken = null;
     renderShell();
     setupTabs();
@@ -513,7 +536,7 @@ function renderFormulaMath(): void {
   const mount = document.querySelector<HTMLDivElement>("#legacyFormulaMount");
   if (!mount) return;
 
-  mount.innerHTML = renderLegacyMath(currentConfig);
+  mount.innerHTML = renderMcr2026Math(currentConfig);
   bindFormulaTokens();
 
   if (activeFormulaToken) {
@@ -579,8 +602,8 @@ const TOKEN_HELP: Record<string, { title: string; text: string; controls?: (keyo
   },
   KT: {
     title: "KT — коэффициент турнира",
-    text: "Сумма компонентов по числу сессий, участникам, среднему EU и статусу ЧЕ/ЧМ.",
-    controls: ["sessionCoef", "playerCountScale", "euComponentScale", "worldEuropeBonus"],
+    text: "Сумма компонентов по числу сессий, участникам, среднему EU и статусу турнира.",
+    controls: ["sessionCoef", "playerCountScale", "euComponentScale", "statusTournamentBonus"],
   },
   KT_S: {
     title: "KT_ЧС",
@@ -589,7 +612,7 @@ const TOKEN_HELP: Record<string, { title: string; text: string; controls?: (keyo
   },
   KT_N: {
     title: "KT_ЧУТ",
-    text: "Компонент KT по числу участников. Масштаб можно менять ползунком, а саму таблицу — в справочнике.",
+    text: "Дискретный компонент KT по ЧУТ. Нормативный расчёт использует только точное значение из таблицы; интерполяции нет.",
     controls: ["playerCountScale"],
     action: "kt",
   },
@@ -600,8 +623,8 @@ const TOKEN_HELP: Record<string, { title: string; text: string; controls?: (keyo
   },
   KT_W: {
     title: "KT_W",
-    text: "Дополнительный бонус турнирам со статусом ЧЕ/ЧМ.",
-    controls: ["worldEuropeBonus"],
+    text: "Дополнительный бонус турнирам со статусом турнира.",
+    controls: ["statusTournamentBonus"],
   },
   VT: {
     title: "VT — вес давности",
@@ -626,7 +649,7 @@ const TOKEN_HELP: Record<string, { title: string; text: string; controls?: (keyo
   },
   DoubleStrike: {
     title: "Double Strike",
-    text: "После первого обновления EU турнир пересчитывается повторно с обновлённым средним EU участников.",
+    text: "Применяется, когда в турнире есть новичок (или игрок замены трактуется как новичок). A: первый проход только уточняет EU новичков и KT, затем весь турнир пересчитывается с исходного состояния. B: второй проход продолжает первый и может добавить ещё изменения.",
   },
   X: {
     title: "NRKTVT",
@@ -655,9 +678,13 @@ function renderFormulaInspector(): void {
 
   if (activeFormulaToken === "DoubleStrike") {
     controls += `
-      <label class="switch-row inspector-switch">
-        <input id="formulaDoubleStrike" type="checkbox" ${currentConfig.doubleStrike ? "checked" : ""}>
+      <label class="select-row inspector-switch">
         <span>Double Strike</span>
+        <select id="formulaDoubleStrike">
+          <option value="none" ${currentConfig.doubleStrikeMode === "none" ? "selected" : ""}>Нет</option>
+          <option value="A" ${currentConfig.doubleStrikeMode === "A" ? "selected" : ""}>A — полный пересчёт</option>
+          <option value="B" ${currentConfig.doubleStrikeMode === "B" ? "selected" : ""}>B — продолжение первой итерации</option>
+        </select>
       </label>`;
   }
 
@@ -678,11 +705,11 @@ function renderFormulaInspector(): void {
   panel.classList.add("open");
   bindNumericControls(panel);
 
-  const ds = panel.querySelector<HTMLInputElement>("#formulaDoubleStrike");
+  const ds = panel.querySelector<HTMLSelectElement>("#formulaDoubleStrike");
   if (ds) {
     ds.addEventListener("change", () => {
-      currentConfig.doubleStrike = ds.checked;
-      byId<HTMLInputElement>("doubleStrike").checked = ds.checked;
+      currentConfig.doubleStrikeMode = ds.value as Mcr2026Config["doubleStrikeMode"];
+      byId<HTMLSelectElement>("doubleStrikeMode").value = ds.value;
       recalc();
     });
   }
@@ -726,7 +753,7 @@ function renderReference(tab: number): void {
   if (tab === 0) {
     panel.innerHTML = table(
       ["EU", "Уровень", "Тип"],
-      LEGACY_LEVELS.map((x) => [x.eu, x.label, x.kind]),
+      MCR2026_LEVELS.map((x) => [x.eu, x.label, x.kind]),
       "reference-table"
     );
   } else if (tab === 1) {
@@ -737,7 +764,7 @@ function renderReference(tab: number): void {
         <button id="resetKt">Сбросить</button>
       </div>
       <div class="table-wrap compact-table"><table class="editor-table">
-        <thead><tr><th>Участники</th><th>Legacy</th><th>Эксперимент</th></tr></thead>
+        <thead><tr><th>Участники</th><th>MCR-2026</th><th>Эксперимент</th></tr></thead>
         <tbody>
         ${Object.entries(KT_PARTICIPANTS).map(([n, v]) => `
           <tr><td>${n}</td><td>${Number(v).toFixed(2)}</td>
@@ -770,9 +797,9 @@ function renderReference(tab: number): void {
         <button id="resetVt">Сбросить</button>
       </div>
       <div class="table-wrap compact-table"><table class="editor-table">
-        <thead><tr><th>Период</th><th>Legacy</th><th>Эксперимент</th></tr></thead>
+        <thead><tr><th>Период</th><th>MCR-2026</th><th>Эксперимент</th></tr></thead>
         <tbody>
-        ${LEGACY_AGE_WEIGHTS.map((x, i) => `
+        ${MCR2026_AGE_WEIGHTS.map((x, i) => `
           <tr><td>${x.minMonths}–${x.maxMonths ?? "∞"} мес.</td><td>${x.weight.toFixed(2)}</td>
           <td><input data-vt="${i}" type="number" min="0" max="2" step="0.01" value="${vtExperiment[i].weight.toFixed(2)}"></td></tr>`
         ).join("")}
@@ -784,7 +811,7 @@ function renderReference(tab: number): void {
       recalc();
     });
     panel.querySelector("#resetVt")!.addEventListener("click", () => {
-      vtExperiment = LEGACY_AGE_WEIGHTS.map((x) => ({ ...x }));
+      vtExperiment = MCR2026_AGE_WEIGHTS.map((x) => ({ ...x }));
       useVtExperiment = false;
       renderReference(2);
       recalc();
@@ -797,8 +824,8 @@ function renderReference(tab: number): void {
     );
   } else {
     panel.innerHTML = table(
-      ["Параметр", "Legacy"],
-      Object.entries(LEGACY_DEFAULTS).map(([k, v]) => [k, String(v)]),
+      ["Параметр", "MCR-2026"],
+      Object.entries(MCR2026_DEFAULTS).map(([k, v]) => [k, String(v)]),
       "reference-table"
     );
   }
@@ -1170,17 +1197,17 @@ function historyOverrides(): TableOverrides {
 function ensureHistorySnapshots(): void {
   if (!historyDirty) return;
 
-  historySnapshots = simulateLegacyHistory(
+  historySnapshots = simulateMcr2026History(
     players,
     results,
     currentConfig,
     historyOverrides(),
     historyInitialMode,
   );
-  historyReferenceSnapshots = simulateLegacyHistory(
+  historyReferenceSnapshots = simulateMcr2026History(
     players,
     results,
-    defaultLegacyConfig(),
+    defaultMcr2026Config(),
     {},
     historyInitialMode,
   );
@@ -1231,7 +1258,7 @@ function renderHistoryWorkspace(): void {
     <div class="history-stat"><span>Турниров</span><strong>${historySnapshots.length}</strong></div>
     <div class="history-stat"><span>Период</span><strong>${esc(first.tournamentDate)} → ${esc(last.tournamentDate)}</strong></div>
     <div class="history-stat"><span>Старт</span><strong>${historyInitialMode === "clean" ? "чистый" : "импортированный EU"}</strong></div>
-    <div class="history-stat"><span>Методы</span><strong>Legacy exp. / default</strong></div>
+    <div class="history-stat"><span>Методы</span><strong>MCR-2026 exp. / default</strong></div>
   `;
 
   slider.min = "0";
@@ -1346,7 +1373,7 @@ function renderHistoryPlayerChart(): void {
       <strong>${esc(name)}</strong>
       <div class="chart-legend">
         <span><i class="legend-line experimental"></i> экспериментальная</span>
-        <span><i class="legend-line reference"></i> Legacy default</span>
+        <span><i class="legend-line reference"></i> MCR-2026 default</span>
       </div>
     </div>
     <svg class="history-chart" viewBox="0 0 ${width} ${height}" role="img"

@@ -1,8 +1,8 @@
 
-import { LegacyEngine } from "./legacy";
+import { Mcr2026Engine } from "./legacy";
 import type {
   InitialStateMode,
-  LegacyConfig,
+  Mcr2026Config,
   PlayerInput,
   RatingSnapshot,
   ResultInput,
@@ -27,7 +27,7 @@ function orderedEvents(results: ResultInput[]): TournamentEvent[] {
         tournamentOrder: Number(row.tournament_order ?? 0),
         participants: Number(row.participants),
         sessions: Number(row.sessions),
-        isWorldEurope: Boolean(row.is_world_europe),
+        isStatusTournament: Boolean(row.is_status_tournament),
       });
     }
   }
@@ -69,10 +69,10 @@ function playersForMode(players: PlayerInput[], mode: InitialStateMode): PlayerI
  * The dataset is small enough for the browser MVP, and later this runner can
  * be replaced by incremental state transitions without changing the UI.
  */
-export function simulateLegacyHistory(
+export function simulateMcr2026History(
   playersInput: PlayerInput[],
   resultsInput: ResultInput[],
-  config: LegacyConfig,
+  config: Mcr2026Config,
   overrides: TableOverrides = {},
   initialStateMode: InitialStateMode = "clean",
 ): RatingSnapshot[] {
@@ -85,7 +85,7 @@ export function simulateLegacyHistory(
     const event = events[index];
     prefix.push(...rowsForEvent(resultsInput, event));
 
-    const engine = new LegacyEngine(config, overrides);
+    const engine = new Mcr2026Engine(config, overrides);
     const result = engine.calculate(
       basePlayers,
       prefix,

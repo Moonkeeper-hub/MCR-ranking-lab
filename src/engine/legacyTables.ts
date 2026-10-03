@@ -1,4 +1,4 @@
-import type { AgeWeight, LegacyConfig } from "./types";
+import type { AgeWeight, Mcr2026Config } from "./types";
 
 export interface LegacyLevel {
   eu: number;
@@ -7,7 +7,7 @@ export interface LegacyLevel {
   ordinal: number;
 }
 
-export const LEGACY_LEVELS: readonly LegacyLevel[] = Object.freeze([
+export const MCR2026_LEVELS: readonly LegacyLevel[] = Object.freeze([
   { eu: 0, label: "12 кю", kind: "kyu", ordinal: 12 },
   { eu: 50, label: "11 кю", kind: "kyu", ordinal: 11 },
   { eu: 100, label: "10 кю", kind: "kyu", ordinal: 10 },
@@ -34,8 +34,8 @@ export const LEGACY_LEVELS: readonly LegacyLevel[] = Object.freeze([
   { eu: 7500, label: "12 дан", kind: "dan", ordinal: 12 },
 ]);
 
-export const LEVEL_VALUES = Object.freeze(LEGACY_LEVELS.map((x) => x.eu));
-export const EU_TO_LEVEL = new Map(LEGACY_LEVELS.map((x) => [x.eu, x] as const));
+export const LEVEL_VALUES = Object.freeze(MCR2026_LEVELS.map((x) => x.eu));
+export const EU_TO_LEVEL = new Map(MCR2026_LEVELS.map((x) => [x.eu, x] as const));
 
 export const KT_PARTICIPANTS: Readonly<Record<number, number>> = Object.freeze({
   12: -0.20, 16: -0.10, 20: 0.00, 24: 0.10, 28: 0.20, 32: 0.30,
@@ -44,10 +44,10 @@ export const KT_PARTICIPANTS: Readonly<Record<number, number>> = Object.freeze({
   84: 1.05, 88: 1.05, 92: 1.10, 96: 1.15, 100: 1.15,
   104: 1.20, 108: 1.20, 112: 1.25, 116: 1.25, 120: 1.30,
   124: 1.30, 128: 1.35, 132: 1.35, 136: 1.40, 140: 1.40,
-  144: 1.40, 148: 1.45, 152: 1.45, 156: 1.50, 160: 1.50, 164: 1.50,
+  144: 1.40, 148: 1.45, 152: 1.45, 156: 1.50, 164: 1.50,
 });
 
-export const LEGACY_AGE_WEIGHTS: readonly AgeWeight[] = Object.freeze([
+export const MCR2026_AGE_WEIGHTS: readonly AgeWeight[] = Object.freeze([
   { minMonths: 0, maxMonths: 2, weight: 1.00 },
   { minMonths: 3, maxMonths: 5, weight: 0.92 },
   { minMonths: 6, maxMonths: 8, weight: 0.84 },
@@ -63,7 +63,7 @@ export const LEGACY_AGE_WEIGHTS: readonly AgeWeight[] = Object.freeze([
   { minMonths: 36, maxMonths: null, weight: 0.00 },
 ]);
 
-export const LEGACY_DEFAULTS: Readonly<LegacyConfig> = Object.freeze({
+export const MCR2026_DEFAULTS: Readonly<Mcr2026Config> = Object.freeze({
   euWeight: 0.25,
   t5Weight: 0.75,
   topN: 5,
@@ -72,14 +72,14 @@ export const LEGACY_DEFAULTS: Readonly<LegacyConfig> = Object.freeze({
   euComponentScale: 1.00,
   euNormalizer: 1000.0,
   euRoundStep: 0.05,
-  worldEuropeBonus: 1.00,
+  statusTournamentBonus: 1.00,
   decayPerQuarter: 0.08,
   maxAgeMonths: 36,
-  doubleStrike: true,
+  doubleStrikeMode: "A",
+  substituteEuPolicy: "zero",
   successesPerStep: 2,
   failuresPerStep: 2,
   danStep: 500,
   confirmationMonths: 12,
   protectedEu: 2000,
-  capPlayerCountComponent: true,
 });
