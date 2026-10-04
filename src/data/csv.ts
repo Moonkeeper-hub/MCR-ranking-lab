@@ -43,7 +43,10 @@ export function playersFromCsv(text: string): PlayerInput[] {
     player_name: String(r.player_name),
     initial_eu: Number(r.initial_eu || r.current_eu || 0),
     initial_marks: Number(r.initial_marks || 0),
-    initial_dan_date: r.initial_dan_date || "",
+    initial_dan_date: r.initial_dan_date || r.last_norm_date || "",
+    include_in_rating: ("include_in_rating" in r)
+      ? asBool(r.include_in_rating)
+      : (("display_in_rating" in r) ? asBool(r.display_in_rating) : true),
   }));
 }
 

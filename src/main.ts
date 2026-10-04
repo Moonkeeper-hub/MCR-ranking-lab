@@ -311,6 +311,13 @@ function renderShell(): void {
                 <div class="micro">
                   «Считать новичком» включает игрока замены в текущую политику Double Strike.
                 </div>
+                <label class="switch-row">
+                  <input type="checkbox" id="capKyuPromotionAtFirstDan" ${currentConfig.capKyuPromotionAtFirstDan ? "checked" : ""}>
+                  <span>Из кю максимум до 1 дана за один турнир</span>
+                </label>
+                <div class="micro">
+                  Если игрок начал турнир на кю, итог этого турнира не может поднять его выше 1 дана (EU 2000), включая Double Strike.
+                </div>
                 ${controlHtml("successesPerStep", "side")}
                 ${controlHtml("failuresPerStep", "side")}
                 ${controlHtml("danStep", "side")}
@@ -447,6 +454,10 @@ function renderShell(): void {
   });
   byId<HTMLSelectElement>("substituteEuPolicy").addEventListener("change", (e) => {
     currentConfig.substituteEuPolicy = (e.currentTarget as HTMLSelectElement).value as Mcr2026Config["substituteEuPolicy"];
+    recalc();
+  });
+  byId<HTMLInputElement>("capKyuPromotionAtFirstDan").addEventListener("change", (e) => {
+    currentConfig.capKyuPromotionAtFirstDan = (e.currentTarget as HTMLInputElement).checked;
     recalc();
   });
 

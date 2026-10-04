@@ -82,4 +82,5 @@ export const MCR2026_DEFAULTS: Readonly<Mcr2026Config> = Object.freeze({
   danStep: 500,
   confirmationMonths: 12,
   protectedEu: 2000,
+  capKyuPromotionAtFirstDan: false,
 });

@@ -175,6 +175,26 @@ export class Mcr2026Engine {
     }
   }
 
+  private enforceKyuPromotionCap(
+    states: Map<string, EvolutionState>,
+    euBeforeTournament: Map<string, number>,
+    participantIds: Iterable<string>,
+    tournamentDate: Date,
+  ): void {
+    if (!this.config.capKyuPromotionAtFirstDan) return;
+    for (const pid of participantIds) {
+      if ((euBeforeTournament.get(pid) ?? 0) > 1750) continue;
+      const state = states.get(pid);
+      if (!state) continue;
+      if (state.eu > 2000 || (state.eu === 2000 && state.marks > 0)) {
+        state.eu = 2000;
+        state.marks = 0;
+        state.danDate = tournamentDate;
+        state.expiryPeriodsApplied = 0;
+      }
+    }
+  }
+
   calculate(
     playersInput: PlayerInput[],
     resultsInput: ResultInput[],
@@ -205,6 +225,7 @@ export class Mcr2026Engine {
         initial_eu: Number(p.initial_eu ?? 0),
         initial_marks: Number(p.initial_marks ?? 0),
         initial_dan_date: String(p.initial_dan_date ?? ""),
+        include_in_rating: p.include_in_rating !== false,
       }))
       .filter((p) => {
         if (options.includeAllPlayers) return true;
@@ -217,6 +238,7 @@ export class Mcr2026Engine {
 
     const states = new Map<string, EvolutionState>();
     const names = new Map<string, string>();
+    const includeInRanking = new Map<string, boolean>();
     const knownPlayers = new Set<string>();
 
     for (const p of players) {
@@ -230,6 +252,7 @@ export class Mcr2026Engine {
         expiryPeriodsApplied: marks < 0 ? 1 : 0,
       });
       names.set(p.player_id, p.player_name);
+      includeInRanking.set(p.player_id, p.include_in_rating !== false);
 
       const hasInitialState =
         Number(p.initial_eu ?? 0) !== 0
@@ -249,6 +272,7 @@ export class Mcr2026Engine {
           danDate: null,
           expiryPeriodsApplied: 0,
         });
+        includeInRanking.set(row.player_id, true);
       }
     }
 
@@ -329,12 +353,14 @@ export class Mcr2026Engine {
 
       if (!shouldDoubleStrike) {
         this.applyTournamentPass(sub, states, kt1.kt, tdate);
+        this.enforceKyuPromotionCap(states, euBefore, participantIds, tdate);
       } else if (this.config.doubleStrikeMode === "A") {
         // Variant A: pass 1 is provisional. It is used only to obtain the
         // updated EU of newcomers/replacements for KT_EU. Final rank changes
         // are recalculated once from the original pre-tournament state.
         const provisionalStates = cloneStates(states);
         this.applyTournamentPass(sub, provisionalStates, kt1.kt, tdate);
+        this.enforceKyuPromotionCap(provisionalStates, euBefore, participantIds, tdate);
 
         const provisionalEu = new Map<string, number>();
         for (const pid of doubleStrikeIds) {
@@ -355,10 +381,12 @@ export class Mcr2026Engine {
         );
 
         this.applyTournamentPass(sub, states, ktFinal.kt, tdate);
+        this.enforceKyuPromotionCap(states, euBefore, participantIds, tdate);
       } else {
         // Variant B: pass 2 continues from the state produced by pass 1 and
         // may therefore award an additional layer of positive changes.
         this.applyTournamentPass(sub, states, kt1.kt, tdate);
+        this.enforceKyuPromotionCap(states, euBefore, participantIds, tdate);
 
         meanEuFinal = this.meanTournamentEu(sub, states, new Map(), true);
         ktFinal = this.tournamentCoefficient(
@@ -369,6 +397,7 @@ export class Mcr2026Engine {
         );
 
         this.applyTournamentPass(sub, states, ktFinal.kt, tdate);
+        this.enforceKyuPromotionCap(states, euBefore, participantIds, tdate);
       }
 
       const vt = this.tournamentWeight(tdate, evaluationDate);
@@ -411,6 +440,7 @@ export class Mcr2026Engine {
 
     const ranking: RankingRow[] = [];
     for (const [pid, state] of states.entries()) {
+      if (includeInRanking.get(pid) === false) continue;
       const playerRows = details
         .filter((x) => x.playerId === pid)
         .sort((a, b) => b.nrktvt - a.nrktvt);

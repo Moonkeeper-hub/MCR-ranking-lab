@@ -8,6 +8,8 @@ export interface PlayerInput {
    * EU_before <= NR * KT was satisfied.
    */
   initial_dan_date?: string;
+  /** Include player in the displayed/internal rating table. Defaults to true. */
+  include_in_rating?: boolean;
   [key: string]: string | number | boolean | undefined;
 }
 
@@ -58,6 +60,8 @@ export interface Mcr2026Config {
   danStep: number;
   confirmationMonths: number;
   protectedEu: number;
+  /** If true, a player who starts a tournament at kyu may finish it at most at 1 dan (EU 2000). */
+  capKyuPromotionAtFirstDan: boolean;
 }
 
 export interface AgeWeight {
