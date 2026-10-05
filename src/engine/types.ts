@@ -23,6 +23,9 @@ export interface ResultInput {
   participants: number;
   sessions: number;
   is_status_tournament: boolean;
+  tournament_type?: string;
+  tournament_start_date?: string;
+  tournament_end_date?: string;
   is_substitute?: boolean;
   /** Deprecated input alias accepted by the CSV parser. */
   is_world_europe?: boolean;

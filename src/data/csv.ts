@@ -78,6 +78,9 @@ export function resultsFromCsv(text: string): ResultInput[] {
     participants: Number(r.participants),
     sessions: Number(r.sessions),
     is_status_tournament: asBool(r.is_status_tournament ?? r.is_world_europe),
+    tournament_type: String(r.tournament_type || r.tournament_scope || ""),
+    tournament_start_date: String(r.tournament_start_date || ""),
+    tournament_end_date: String(r.tournament_end_date || r.tournament_date || ""),
     is_substitute: asBool(r.is_substitute),
   }));
 }

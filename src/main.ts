@@ -1,8 +1,13 @@
 
 import "./styles.css";
 import "katex/dist/katex.min.css";
-import { renderMcr2026Math } from "./ui/formulas";
+import { renderMcr2026Math, renderRrMath } from "./ui/formulas";
 import { Mcr2026Engine, defaultMcr2026Config } from "./engine/legacy";
+import {
+  RrEngine, defaultRrConfig, RR_DEFAULT_PLAYER_BANDS, RR_DEFAULT_SESSION_BANDS,
+  RR_DEFAULT_TYPE_MULTIPLIERS, RR_DEFAULT_SPECIAL_COEFFICIENTS,
+} from "./engine/rr";
+import type { RrCalculationResult, RrConfig, RrRangeBand, RrSpecialCoefficient } from "./engine/rr";
 import { simulateMcr2026History } from "./engine/simulation";
 import {
   KT_PARTICIPANTS,
@@ -32,6 +37,12 @@ let useKtExperiment = false;
 let useVtExperiment = false;
 let current: CalculationResult | null = null;
 let reference: CalculationResult | null = null;
+let rrConfig: RrConfig = defaultRrConfig();
+let rrPlayerBands: RrRangeBand[] = RR_DEFAULT_PLAYER_BANDS.map((x) => ({ ...x }));
+let rrSessionBands: RrRangeBand[] = RR_DEFAULT_SESSION_BANDS.map((x) => ({ ...x }));
+let rrTypeMultipliers: Record<string, number> = { ...RR_DEFAULT_TYPE_MULTIPLIERS };
+let rrSpecialCoefficients: RrSpecialCoefficient[] = RR_DEFAULT_SPECIAL_COEFFICIENTS.map((x) => ({ ...x }));
+let rrCurrent: RrCalculationResult | null = null;
 let dataLabel = "встроенный demo dataset";
 let activeFormulaToken: string | null = null;
 let activeReferenceTab = 0;
@@ -53,7 +64,7 @@ let rankingSortKey: RankingSortKey = "rank";
 let rankingSortDir: "asc" | "desc" = "asc";
 let expandedPlayerId: string | null = null;
 
-let activeWorkspace: "lab" | "history" = "lab";
+let activeWorkspace: "comparison" | "history" | "lab" = "comparison";
 let historyInitialMode: InitialStateMode = "clean";
 let historySnapshots: RatingSnapshot[] = [];
 let historyReferenceSnapshots: RatingSnapshot[] = [];
@@ -87,10 +98,17 @@ function recalc(): void {
   try {
     current = new Mcr2026Engine(currentConfig, overrides).calculate(players, results, evaluationDate);
     reference = new Mcr2026Engine(defaultMcr2026Config()).calculate(players, results, evaluationDate);
+    rrCurrent = new RrEngine(rrConfig, {
+      playerBands: rrPlayerBands,
+      sessionBands: rrSessionBands,
+      tournamentTypeMultipliers: rrTypeMultipliers,
+      specialCoefficients: rrSpecialCoefficients,
+    }).calculate(players, results, evaluationDate);
     historyDirty = true;
     syncAllControlValues();
     renderFormulaMath();
     renderOutput();
+    renderComparison();
     if (activeWorkspace === "history") renderHistoryWorkspace();
     const visibleResults = results.filter((r) => String(r.tournament_date) <= evaluationDate).length;
     setStatus(
@@ -201,13 +219,163 @@ function syncAllControlValues(): void {
   if (topN) topN.textContent = String(currentConfig.topN);
 }
 
+
+type RrNumericKey = {
+  [K in keyof RrConfig]: RrConfig[K] extends number ? K : never
+}[keyof RrConfig];
+
+const RR_CONTROL_DEFS: { key: RrNumericKey; label: string; min: number; max: number; step: number; digits?: number }[] = [
+  { key: "firstPartWeight", label: "Вес P1", min: 0, max: 1, step: 0.01 },
+  { key: "secondPartWeight", label: "Вес P2", min: 0, max: 1, step: 0.01 },
+  { key: "minimumTournaments", label: "Минимум турниров", min: 1, max: 10, step: 1, digits: 0 },
+  { key: "firstPartBaseTournaments", label: "База P1", min: 1, max: 10, step: 1, digits: 0 },
+  { key: "firstPartAdditionalShare", label: "Доля доп. турниров P1", min: 0, max: 1, step: 0.01 },
+  { key: "secondPartBestTournaments", label: "Лучших турниров P2", min: 1, max: 10, step: 1, digits: 0 },
+  { key: "firstPartMissingDenominator", label: "Штраф за недостающий турнир P1", min: 0, max: 3, step: 0.05 },
+  { key: "baseRankScale", label: "Шкала места", min: 100, max: 2000, step: 50, digits: 0 },
+  { key: "ratingWindowDays", label: "Окно рейтинга, дней", min: 90, max: 1460, step: 5, digits: 0 },
+  { key: "playersPerUnit", label: "Игроков в единице K_N", min: 1, max: 8, step: 1, digits: 0 },
+  { key: "playersCoefficientCap", label: "Cap K_N", min: 0.5, max: 5, step: 0.05 },
+  { key: "sessionsCoefficientCap", label: "Cap K_S", min: 0.5, max: 5, step: 0.05 },
+  { key: "ageFullMonths", label: "Полный вес, мес.", min: 0, max: 24, step: 1, digits: 0 },
+  { key: "ageZeroMonths", label: "Нулевой вес, мес.", min: 6, max: 60, step: 1, digits: 0 },
+  { key: "ageStepMonths", label: "Шаг устаревания, мес.", min: 1, max: 12, step: 1, digits: 0 },
+  { key: "ageStepDrop", label: "Падение веса за шаг", min: 0, max: 0.5, step: 0.01 },
+];
+
+function rrControlHtml(def: typeof RR_CONTROL_DEFS[number]): string {
+  const value = Number(rrConfig[def.key]);
+  const digits = def.digits ?? 2;
+  return `<div class="control-row">
+    <div class="control-head"><label>${esc(def.label)}</label><span class="control-value">${value.toFixed(digits)}</span></div>
+    <input data-rr-config-key="${String(def.key)}" type="range" min="${def.min}" max="${def.max}" step="${def.step}" value="${value}">
+  </div>`;
+}
+
+function renderRrControls(): void {
+  const scalars = document.querySelector<HTMLDivElement>("#rrScalarControls");
+  if (!scalars) return;
+  scalars.innerHTML = RR_CONTROL_DEFS.map(rrControlHtml).join("");
+
+  const playerBands = document.querySelector<HTMLDivElement>("#rrPlayerBands");
+  if (playerBands) playerBands.innerHTML = rrBandTable(rrPlayerBands, "player");
+  const sessionBands = document.querySelector<HTMLDivElement>("#rrSessionBands");
+  if (sessionBands) sessionBands.innerHTML = rrBandTable(rrSessionBands, "session");
+  const specials = document.querySelector<HTMLDivElement>("#rrSpecialCoefficients");
+  if (specials) specials.innerHTML = `<div class="micro">Исторические player-specific коэффициенты из HARDCODED_COEFFICIENTS. При совпадении tournament_id + player_id заменяют обычный K турнира.</div>
+    <div class="table-wrap compact-table"><table class="editor-table">
+      <thead><tr><th>Турнир ID</th><th>Игрок ID</th><th>K</th></tr></thead><tbody>
+      ${rrSpecialCoefficients.map((row, i) => `<tr><td><input data-rr-special-tournament="${i}" type="text" value="${esc(row.tournamentId)}"></td><td><input data-rr-special-player="${i}" type="text" value="${esc(row.playerId)}"></td><td><input data-rr-special-coef="${i}" type="number" min="0" max="10" step="0.01" value="${row.coefficient.toFixed(2)}"></td></tr>`).join("")}
+      </tbody></table></div>`;
+  const types = document.querySelector<HTMLDivElement>("#rrTypeMultipliers");
+  if (types) types.innerHTML = `<div class="micro">Лабораторный множитель типа турнира; в историческом rr.py отдельной такой таблицы нет.</div><div class="table-wrap compact-table"><table class="editor-table">
+    <thead><tr><th>Тип</th><th>Множитель</th></tr></thead><tbody>
+    ${Object.entries(rrTypeMultipliers).map(([type, value]) => `<tr><td>${esc(type)}</td><td><input data-rr-type="${esc(type)}" type="number" min="0" max="5" step="0.05" value="${value.toFixed(2)}"></td></tr>`).join("")}
+    </tbody></table></div>`;
+  bindRrControls();
+}
+
+function rrBandTable(bands: RrRangeBand[], kind: "player" | "session"): string {
+  const unit = kind === "player" ? "игроков" : "туров";
+  return `<div class="table-wrap compact-table"><table class="editor-table">
+    <thead><tr><th>До, ${unit}</th><th>+ за единицу</th></tr></thead><tbody>
+    ${bands.map((band, i) => `<tr><td><input data-rr-band-max="${kind}:${i}" type="number" min="1" step="1" value="${band.max ?? ""}"></td><td><input data-rr-band-inc="${kind}:${i}" type="number" min="0" max="2" step="0.01" value="${band.increment.toFixed(2)}"></td></tr>`).join("")}
+    </tbody></table></div>`;
+}
+
+function bindRrControls(): void {
+  document.querySelectorAll<HTMLInputElement>("[data-rr-config-key]").forEach((input) => {
+    input.oninput = () => {
+      const key = input.dataset.rrConfigKey as RrNumericKey;
+      const value = Number(input.value);
+      (rrConfig[key] as number) = value;
+      if (key === "firstPartWeight") rrConfig.secondPartWeight = Number((1 - value).toFixed(2));
+      if (key === "secondPartWeight") rrConfig.firstPartWeight = Number((1 - value).toFixed(2));
+      renderRrControls();
+      recalc();
+    };
+  });
+  document.querySelectorAll<HTMLInputElement>("[data-rr-band-max]").forEach((input) => {
+    input.onchange = () => {
+      const [kind, raw] = input.dataset.rrBandMax!.split(":");
+      const bands = kind === "player" ? rrPlayerBands : rrSessionBands;
+      bands[Number(raw)].max = input.value === "" ? null : Number(input.value);
+      recalc();
+    };
+  });
+  document.querySelectorAll<HTMLInputElement>("[data-rr-band-inc]").forEach((input) => {
+    input.onchange = () => {
+      const [kind, raw] = input.dataset.rrBandInc!.split(":");
+      const bands = kind === "player" ? rrPlayerBands : rrSessionBands;
+      bands[Number(raw)].increment = Number(input.value);
+      recalc();
+    };
+  });
+  document.querySelectorAll<HTMLInputElement>("[data-rr-type]").forEach((input) => {
+    input.onchange = () => { rrTypeMultipliers[input.dataset.rrType!] = Number(input.value); recalc(); };
+  });
+  document.querySelectorAll<HTMLInputElement>("[data-rr-special-tournament]").forEach((input) => {
+    input.onchange = () => { rrSpecialCoefficients[Number(input.dataset.rrSpecialTournament!)].tournamentId = input.value.trim(); recalc(); };
+  });
+  document.querySelectorAll<HTMLInputElement>("[data-rr-special-player]").forEach((input) => {
+    input.onchange = () => { rrSpecialCoefficients[Number(input.dataset.rrSpecialPlayer!)].playerId = input.value.trim(); recalc(); };
+  });
+  document.querySelectorAll<HTMLInputElement>("[data-rr-special-coef]").forEach((input) => {
+    input.onchange = () => { rrSpecialCoefficients[Number(input.dataset.rrSpecialCoef!)].coefficient = Number(input.value); recalc(); };
+  });
+}
+
+function renderComparison(): void {
+  const formula = document.querySelector<HTMLDivElement>("#rrFormulaMount");
+  if (formula) formula.innerHTML = renderRrMath(rrConfig);
+  renderRrControls();
+  const host = document.querySelector<HTMLDivElement>("#comparisonRanking");
+  const metrics = document.querySelector<HTMLDivElement>("#comparisonMetrics");
+  if (!host || !metrics || !current || !rrCurrent) return;
+
+  const rrById = new Map(rrCurrent.ranking.map((row) => [row.playerId, row]));
+  const ids = new Set([...current.ranking.map((x) => x.playerId), ...rrCurrent.ranking.map((x) => x.playerId)]);
+  const rows = [...ids].map((playerId) => {
+    const m = current!.ranking.find((x) => x.playerId === playerId);
+    const r = rrById.get(playerId);
+    return {
+      playerId,
+      playerName: m?.playerName ?? r?.playerName ?? playerId,
+      mcrRank: m?.rank ?? null,
+      rrRank: r?.rank ?? null,
+      mcrRating: m?.rating ?? null,
+      rrRating: r?.rating ?? null,
+      rrP1: r?.firstPart ?? null,
+      rrP2: r?.secondPart ?? null,
+      deltaRank: m && r ? m.rank - r.rank : null,
+    };
+  }).sort((a, b) => (a.mcrRank ?? 1e9) - (b.mcrRank ?? 1e9));
+
+  const shared = rows.filter((x) => x.mcrRank !== null && x.rrRank !== null);
+  const meanAbs = shared.length ? shared.reduce((sum, x) => sum + Math.abs(x.deltaRank ?? 0), 0) / shared.length : 0;
+  metrics.innerHTML = `<div><span>Игроков MCR</span><strong>${current.ranking.length}</strong></div>
+    <div><span>Игроков RR</span><strong>${rrCurrent.ranking.length}</strong></div>
+    <div><span>Средний |Δ места|</span><strong>${fmt(meanAbs, 1)}</strong></div>`;
+
+  host.innerHTML = `<div class="table-wrap ranking-wrap"><table class="ranking-table comparison-table">
+    <thead><tr><th>Игрок</th><th>MCR #</th><th>RR #</th><th>Δ место RR−MCR</th><th>MCR Rating</th><th>RR</th><th>P1</th><th>P2</th><th>Турниров RR</th></tr></thead>
+    <tbody>${rows.map((x) => {
+      const rr = rrById.get(x.playerId);
+      const d = x.deltaRank;
+      return `<tr><td>${esc(x.playerName)}</td><td>${x.mcrRank ?? "—"}</td><td>${x.rrRank ?? "—"}</td>
+        <td class="${d && d > 0 ? "pos" : d && d < 0 ? "neg" : ""}">${d === null ? "—" : `${d >= 0 ? "+" : ""}${d}`}</td>
+        <td>${x.mcrRating === null ? "—" : fmt(x.mcrRating)}</td><td>${x.rrRating === null ? "—" : fmt(x.rrRating)}</td>
+        <td>${x.rrP1 === null ? "—" : fmt(x.rrP1)}</td><td>${x.rrP2 === null ? "—" : fmt(x.rrP2)}</td><td>${rr?.tournamentsCount ?? "—"}</td></tr>`;
+    }).join("")}</tbody></table></div>`;
+}
+
 function renderShell(): void {
   app.innerHTML = `
     <div class="app">
       <header class="topbar">
         <div>
           <h1>MCR Rating Lab</h1>
-          <div class="subtitle">v0.26 · TypeScript · расчёт выполняется в браузере</div>
+          <div class="subtitle">v0.28 · TypeScript · MCR-2026 + RR · расчёт выполняется в браузере</div>
         </div>
         <div class="topbar-actions">
           <div class="privacy-pill">CSV остаются на устройстве пользователя</div>
@@ -227,15 +395,81 @@ function renderShell(): void {
       </header>
 
       <nav class="workspace-tabs" aria-label="Режим работы">
-        <button id="workspaceLab" class="workspace-tab active" type="button">
-          Лаборатория
+        <button id="workspaceComparison" class="workspace-tab active" type="button">
+          Сравнение методик
         </button>
         <button id="workspaceHistory" class="workspace-tab" type="button">
           История / симуляция
         </button>
+        <button id="workspaceLab" class="workspace-tab" type="button">
+          Лаборатория
+        </button>
       </nav>
 
-      <div id="labWorkspace" class="workspace-panel active">
+      <section id="comparisonWorkspace" class="workspace-panel active comparison-workspace">
+        <div class="layout">
+          <aside class="sidebar">
+            <section class="side-card">
+              <div class="side-title">RR — параметры</div>
+              <details class="side-section" open>
+                <summary>Итоговая формула</summary>
+                <div class="section-body" id="rrScalarControls"></div>
+              </details>
+              <details class="side-section" open>
+                <summary>Коэффициент по участникам</summary>
+                <div class="section-body" id="rrPlayerBands"></div>
+              </details>
+              <details class="side-section">
+                <summary>Коэффициент по турам</summary>
+                <div class="section-body" id="rrSessionBands"></div>
+              </details>
+              <details class="side-section">
+                <summary>Специальные коэффициенты</summary>
+                <div class="section-body" id="rrSpecialCoefficients"></div>
+              </details>
+              <details class="side-section">
+                <summary>Тип турнира — эксперимент</summary>
+                <div class="section-body" id="rrTypeMultipliers"></div>
+              </details>
+              <div class="sidebar-footer">
+                <button id="resetRrConfig" class="full">Сбросить RR к исходному коду</button>
+              </div>
+            </section>
+          </aside>
+          <main class="main">
+            <section class="formula-card">
+              <div class="eyebrow-row">
+                <div>
+                  <div class="eyebrow">RR</div>
+                  <div class="formula-caption">Порт алгоритма RatingRRCalculation из rr.py</div>
+                </div>
+                <div class="formula-badge">редактируемая формула</div>
+              </div>
+              <div id="rrFormulaMount" class="legacy-formula-mount">${renderRrMath(rrConfig)}</div>
+              <div class="formula-hint">
+                Коэффициенты слева изменяют формулу и пересчитывают тот же dataset, который используется MCR-2026.
+              </div>
+            </section>
+            <section class="results-card">
+              <div class="results-head">
+                <div>
+                  <h2>MCR-2026 ↔ RR</h2>
+                  <div class="reference-labels"><span>Один dataset</span><span>сравнение по месту, не по абсолютной шкале rating</span></div>
+                </div>
+                <div id="comparisonMetrics" class="metrics-strip"></div>
+              </div>
+              <div id="comparisonRanking"></div>
+            </section>
+            <section class="results-card comparison-next-card">
+              <div class="eyebrow">Следующий слой — v0.29</div>
+              <h2>Метрика дистанции Патрика</h2>
+              <div class="notice">Пары гистограмм «турниров до достижения / повторного достижения места» будут построены здесь поверх истории MCR и RR. В v0.28 подготовлены два движка и общий входной dataset.</div>
+            </section>
+          </main>
+        </div>
+      </section>
+
+      <div id="labWorkspace" class="workspace-panel">
       <div class="layout">
         <aside class="sidebar">
           <section class="side-card">
@@ -483,8 +717,19 @@ function renderShell(): void {
 
   byId("exportRankingCsv").addEventListener("click", exportRankingCsv);
 
+  byId("workspaceComparison").addEventListener("click", () => setWorkspace("comparison"));
   byId("workspaceLab").addEventListener("click", () => setWorkspace("lab"));
   byId("workspaceHistory").addEventListener("click", () => setWorkspace("history"));
+  bindRrControls();
+  byId("resetRrConfig").addEventListener("click", () => {
+    rrConfig = defaultRrConfig();
+    rrPlayerBands = RR_DEFAULT_PLAYER_BANDS.map((x) => ({ ...x }));
+    rrSessionBands = RR_DEFAULT_SESSION_BANDS.map((x) => ({ ...x }));
+    rrTypeMultipliers = { ...RR_DEFAULT_TYPE_MULTIPLIERS };
+    rrSpecialCoefficients = RR_DEFAULT_SPECIAL_COEFFICIENTS.map((x) => ({ ...x }));
+    renderRrControls();
+    recalc();
+  });
 
   byId("supportButton").addEventListener("click", () => {
     const popover = byId<HTMLDivElement>("supportPopover");
@@ -1186,18 +1431,23 @@ function renderOutput(): void {
 }
 
 
-function setWorkspace(workspace: "lab" | "history"): void {
+function setWorkspace(workspace: "comparison" | "lab" | "history"): void {
   activeWorkspace = workspace;
+  const comparison = byId("comparisonWorkspace");
   const lab = byId("labWorkspace");
   const history = byId("historyWorkspace");
+  const comparisonButton = byId("workspaceComparison");
   const labButton = byId("workspaceLab");
   const historyButton = byId("workspaceHistory");
 
+  comparison.classList.toggle("active", workspace === "comparison");
   lab.classList.toggle("active", workspace === "lab");
   history.classList.toggle("active", workspace === "history");
+  comparisonButton.classList.toggle("active", workspace === "comparison");
   labButton.classList.toggle("active", workspace === "lab");
   historyButton.classList.toggle("active", workspace === "history");
 
+  if (workspace === "comparison") renderComparison();
   if (workspace === "history") renderHistoryWorkspace();
 }
 

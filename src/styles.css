@@ -1135,3 +1135,10 @@ td.neg { color: var(--negative); }
 .inspector-switch {
   min-width: 250px;
 }
+
+/* v0.28 — RR / comparison */
+.comparison-workspace { padding: 0; }
+.comparison-table td:first-child { min-width: 230px; }
+.comparison-next-card { margin-top: 14px; }
+#rrScalarControls .control-row { margin-bottom: 10px; }
+#rrPlayerBands input, #rrSessionBands input, #rrTypeMultipliers input { width: 92px; }
