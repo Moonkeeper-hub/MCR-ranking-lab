@@ -71,12 +71,49 @@ let expandedPlayerId: string | null = null;
 
 let activeWorkspace: "comparison" | "lab" = "comparison";
 let historyInitialMode: InitialStateMode = "clean";
-let historySnapshots: RatingSnapshot[] = [];
-let historyReferenceSnapshots: RatingSnapshot[] = [];
+
+type HistoryMethodId = string;
+interface UnifiedHistoryRow {
+  rank: number;
+  playerId: string;
+  playerName: string;
+  rating: number;
+  tournamentsCount: number;
+  level?: string;
+  currentEu?: number;
+  t5?: number;
+}
+interface UnifiedHistorySnapshot {
+  index: number;
+  event: {
+    tournamentId: string;
+    tournamentName: string;
+    tournamentDate: string;
+    tournamentOrder: number;
+    participants: number;
+    sessions: number;
+    isStatusTournament: boolean;
+  };
+  ranking: UnifiedHistoryRow[];
+  mcrResult?: CalculationResult;
+  rrResult?: RrCalculationResult;
+}
+let historyMethodA: HistoryMethodId = "mcr-default";
+let historyMethodB: HistoryMethodId = "rr-default";
+let historyPeriodStart = "";
+let historyPeriodEnd = "";
+let historySettingsOpen: "methods" | "period" | null = null;
+let historySnapshots: UnifiedHistorySnapshot[] = [];
+let historyReferenceSnapshots: UnifiedHistorySnapshot[] = [];
 let historySnapshotIndex = 0;
 let historyPlayerId: string | null = null;
 let historyExpandedPlayerId: string | null = null;
 let historyDirty = true;
+
+let comparisonSortKey = "mcrRank";
+let comparisonSortDir: "asc" | "desc" = "asc";
+let historyTableSortKey = "rankA";
+let historyTableSortDir: "asc" | "desc" = "asc";
 
 
 function esc(v: unknown): string {
@@ -465,6 +502,28 @@ function diagnosticSummaryHtml(title: string, result: { diagnostics?: any[]; isC
   return `<div class="method-validation ${cls}"><div><strong>${esc(title)}</strong><span>${state}</span></div><div class="micro">Обработано турниров: ${result.processedTournamentCount ?? "—"}${result.skippedTournamentCount ? ` · пропущено: ${result.skippedTournamentCount}` : ""}</div>${rows ? `<ul>${rows}</ul>` : ""}${kind === "mcr" && incomplete ? `<div class="micro">Канонический MCR-2026 не интерполирует отсутствующие ЧУТ. В Лаборатории можно выбрать другой режим обработки и сохранить его как пользовательский preset.</div>` : ""}</div>`;
 }
 
+function comparisonSortHeader(label: string, key: string): string {
+  const active = comparisonSortKey === key;
+  const arrow = active ? (comparisonSortDir === "asc" ? " ↑" : " ↓") : "";
+  return `<button class="sort-header" type="button" data-comparison-sort="${esc(key)}">${esc(label)}${arrow}</button>`;
+}
+
+function exportComparisonCsv(rows: any[], presetResult: any | null): void {
+  const header = ["player_id","player_name","mcr_rank","rr_rank","delta_rr_minus_mcr"];
+  if (presetResult) header.push("preset_name","preset_rank","delta_preset_minus_mcr");
+  header.push("mcr_rating","rr_rating");
+  const lines = [header.map(csvCell).join(",")];
+  rows.forEach((x) => {
+    const d = x.deltaRank;
+    const pd = x.mcrRank !== null && x.presetRank !== null ? x.mcrRank - x.presetRank : null;
+    const row: unknown[] = [x.playerId,x.playerName,x.mcrRank ?? "",x.rrRank ?? "",d ?? ""];
+    if (presetResult) row.push(presetResult.name,x.presetRank ?? "",pd ?? "");
+    row.push(x.mcrRating ?? "",x.rrRating ?? "");
+    lines.push(row.map(csvCell).join(","));
+  });
+  downloadTextFile(`method-comparison-${evaluationDateState}.csv`, lines.join("\r\n"));
+}
+
 function renderComparison(): void {
   const host = document.querySelector<HTMLDivElement>("#comparisonRanking");
   const metrics = document.querySelector<HTMLDivElement>("#comparisonMetrics");
@@ -488,7 +547,7 @@ function renderComparison(): void {
   const rrById = new Map((rrReference?.ranking ?? []).map((x) => [x.playerId, x]));
   const presetById = new Map((presetResult?.ranking ?? []).map((x) => [x.playerId, x]));
   const ids = new Set([...mcrById.keys(), ...rrById.keys(), ...presetById.keys()]);
-  const rows = [...ids].map((playerId) => {
+  let rows = [...ids].map((playerId) => {
     const m = mcrById.get(playerId);
     const r = rrById.get(playerId);
     const p = presetById.get(playerId);
@@ -503,7 +562,16 @@ function renderComparison(): void {
       presetRating: p?.rating ?? null,
       deltaRank: m && r ? m.rank - r.rank : null,
     };
-  }).sort((a,b)=>(a.mcrRank ?? 1e9)-(b.mcrRank ?? 1e9));
+  });
+
+  const sortValue = (x: any): any => x[comparisonSortKey];
+  rows.sort((a,b) => {
+    const av=sortValue(a), bv=sortValue(b);
+    if (av === null || av === undefined) return 1;
+    if (bv === null || bv === undefined) return -1;
+    let cmp = typeof av === "string" ? String(av).localeCompare(String(bv), "ru") : Number(av)-Number(bv);
+    return comparisonSortDir === "asc" ? cmp : -cmp;
+  });
 
   const shared = rows.filter((x) => x.mcrRank !== null && x.rrRank !== null);
   const meanAbs = shared.length ? shared.reduce((sum,x)=>sum+Math.abs(x.deltaRank ?? 0),0)/shared.length : 0;
@@ -518,9 +586,11 @@ function renderComparison(): void {
   </div>`;
 
   const presetHeaders = presetResult
-    ? `<th>${esc(presetResult.name)} #</th><th>Δ preset−MCR</th>` : "";
-  host.innerHTML = `${validationHtml}<div class="table-wrap ranking-wrap"><table class="ranking-table comparison-table">
-    <thead><tr><th>Игрок</th><th>MCR-2026 #</th><th>RR #</th><th>Δ RR−MCR</th>${presetHeaders}<th>MCR Rating</th><th>RR</th></tr></thead>
+    ? `<th>${comparisonSortHeader(`${presetResult.name} #`, "presetRank")}</th><th>Δ preset−MCR</th>` : "";
+  host.innerHTML = `${validationHtml}
+    <div class="ranking-toolbar"><div class="micro">${rows.length} игроков</div><button id="exportComparisonCsv" class="download-button" type="button">↓ CSV</button></div>
+    <div class="table-wrap ranking-wrap"><table class="ranking-table comparison-table">
+    <thead><tr><th>${comparisonSortHeader("Игрок", "playerName")}</th><th>${comparisonSortHeader("MCR-2026 #", "mcrRank")}</th><th>${comparisonSortHeader("RR #", "rrRank")}</th><th>${comparisonSortHeader("Δ RR−MCR", "deltaRank")}</th>${presetHeaders}<th>${comparisonSortHeader("MCR Rating", "mcrRating")}</th><th>${comparisonSortHeader("RR", "rrRating")}</th></tr></thead>
     <tbody>${rows.map((x)=>{
       const d=x.deltaRank;
       const pd=x.mcrRank!==null && x.presetRank!==null ? x.mcrRank-x.presetRank : null;
@@ -529,6 +599,16 @@ function renderComparison(): void {
         ${presetResult ? `<td>${x.presetRank ?? "—"}</td><td class="${pd && pd>0?"pos":pd&&pd<0?"neg":""}">${pd===null?"—":`${pd>=0?"+":""}${pd}`}</td>` : ""}
         <td>${x.mcrRating===null?"—":fmt(x.mcrRating)}</td><td>${x.rrRating===null?"—":fmt(x.rrRating)}</td></tr>`;
     }).join("")}</tbody></table></div>`;
+
+  host.querySelectorAll<HTMLButtonElement>("[data-comparison-sort]").forEach((button) => {
+    button.onclick = () => {
+      const key = button.dataset.comparisonSort!;
+      if (comparisonSortKey === key) comparisonSortDir = comparisonSortDir === "asc" ? "desc" : "asc";
+      else { comparisonSortKey = key; comparisonSortDir = "asc"; }
+      renderComparison();
+    };
+  });
+  host.querySelector<HTMLButtonElement>("#exportComparisonCsv")?.addEventListener("click", () => exportComparisonCsv(rows, presetResult));
 }
 
 function renderShell(): void {
@@ -572,7 +652,7 @@ function renderShell(): void {
 
   app.innerHTML = `
     <div class="app">
-      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.28.2 · TypeScript · MCR-2026 + RR · расчёт выполняется в браузере</div></div>
+      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.28.4 · TypeScript · MCR-2026 + RR · расчёт выполняется в браузере</div></div>
         <div class="topbar-actions"><div class="privacy-pill">CSV остаются на устройстве пользователя</div>
         <div class="support-wrap"><button id="supportButton" class="support-button" type="button">Donate / Support</button>
         <div id="supportPopover" class="support-popover" hidden><strong>Поддержать проект</strong><span>Перевод по номеру телефона на Сбербанк</span><div class="support-number-row"><code>+7 967 087 1525</code><button id="copySupportNumber" type="button">Копировать</button></div><span id="supportCopyStatus" class="micro"></span></div></div></div>
@@ -591,14 +671,15 @@ function renderShell(): void {
             <div class="comparison-toolbar"><label>Пользовательский пресет <select id="comparisonPresetSelect"><option value="">Без пользовательского пресета</option></select></label></div>
             <div id="comparisonRanking"></div>
           </section>
-          <section class="results-card comparison-next-card"><div class="eyebrow">v0.29</div><h2>Метрика дистанции Патрика</h2><div class="notice">Пары гистограмм «турниров до достижения / повторного достижения места» будут добавлены сюда следующим патчем. Архитектура уже сравнивает один dataset через независимые движки и пользовательские пресеты.</div></section>
+          <section class="results-card comparison-next-card"><div class="eyebrow">v0.29</div><h2>Метрика дистанции</h2><div class="notice">Пары гистограмм «турниров до достижения / повторного достижения места» будут добавлены сюда следующим патчем. Архитектура уже сравнивает один dataset через независимые движки и пользовательские пресеты.</div></section>
 
           <section class="history-card history-embedded">
             <div class="history-header"><div><div class="eyebrow">История / симуляция</div><div class="formula-caption">Шкала истории сохранена ниже сравнения методик.</div></div>
               <label class="history-mode">Начальное состояние<select id="historyInitialMode"><option value="clean" ${historyInitialMode === "clean" ? "selected" : ""}>Чистый старт</option><option value="imported" ${historyInitialMode === "imported" ? "selected" : ""}>Игроки + импортированный EU</option></select></label></div>
             <div id="historySummary" class="history-summary"></div><div class="timeline-control"><input id="historySlider" type="range" min="0" max="0" step="1" value="0"><div id="historyTicks" class="history-ticks"></div></div>
           </section>
-          <section class="history-card"><div class="history-player-toolbar"><div><strong>Движение игрока</strong><span class="micro">MCR-конфигурация лаборатории против MCR-2026 default</span></div><select id="historyPlayerSelect"></select></div><div id="historyPlayerChart"></div></section>
+          <div id="historySettingsPanel"></div>
+          <section class="history-card"><div class="history-player-toolbar"><div><strong>Движение игрока</strong><span class="micro" id="historyChartMethodsLabel">Две выбранные методики</span></div><select id="historyPlayerSelect"></select></div><div id="historyPlayerChart"></div></section>
           <section id="historySnapshotPanel" class="history-card"></section>
         </main>
       </section>
@@ -1414,353 +1495,171 @@ function historyOverrides(): TableOverrides {
   return overrides;
 }
 
+function historyMethodOptions(): Array<{ id: string; label: string; method: "mcr"|"rr"; preset?: SavedLabPreset }> {
+  const base = [
+    { id: "mcr-default", label: "MCR-2026 default", method: "mcr" as const },
+    { id: "rr-default", label: "RR default", method: "rr" as const },
+  ];
+  return base.concat(loadPresets().map((preset) => ({
+    id: `preset:${preset.id}`,
+    label: `${preset.name} · ${preset.method.toUpperCase()}`,
+    method: preset.method,
+    preset,
+  })));
+}
+
+function historyMethodLabel(id: string): string {
+  return historyMethodOptions().find((x) => x.id === id)?.label ?? id;
+}
+
+function orderedHistoryEvents() {
+  const map = new Map<string, UnifiedHistorySnapshot["event"]>();
+  for (const row of results) {
+    const event = {
+      tournamentId: String(row.tournament_id), tournamentName: String(row.tournament_name),
+      tournamentDate: String(row.tournament_date), tournamentOrder: Number(row.tournament_order ?? 0),
+      participants: Number(row.participants), sessions: Number(row.sessions),
+      isStatusTournament: Boolean(row.is_status_tournament),
+    };
+    const key = `${event.tournamentDate}\u0000${event.tournamentOrder}\u0000${event.tournamentId}`;
+    if (!map.has(key)) map.set(key,event);
+  }
+  return [...map.values()].sort((a,b)=>a.tournamentDate.localeCompare(b.tournamentDate)||a.tournamentOrder-b.tournamentOrder||a.tournamentId.localeCompare(b.tournamentId));
+}
+
+function toUnifiedMcr(snapshots: RatingSnapshot[]): UnifiedHistorySnapshot[] {
+  return snapshots.map((s) => ({
+    index: s.index, event: s.event,
+    ranking: s.result.ranking.map((r)=>({rank:r.rank,playerId:r.playerId,playerName:r.playerName,rating:r.rating,tournamentsCount:r.tournamentsCount,level:r.level,currentEu:r.currentEu,t5:r.t5})),
+    mcrResult: s.result,
+  }));
+}
+
+function buildHistoryForMethod(methodId: string): UnifiedHistorySnapshot[] {
+  const option = historyMethodOptions().find((x)=>x.id===methodId) ?? historyMethodOptions()[0];
+  if (option.method === "mcr") {
+    let config = defaultMcr2026Config();
+    let overrides: TableOverrides = {};
+    if (option.preset) {
+      const payload=option.preset.payload ?? {};
+      config={...config,...(payload.config ?? {})};
+      if(payload.useKtExperiment) overrides.ktParticipants=payload.ktExperiment;
+      if(payload.useVtExperiment) overrides.ageWeights=payload.vtExperiment;
+    }
+    return toUnifiedMcr(simulateMcr2026History(players,results,config,overrides,historyInitialMode));
+  }
+
+  const payload=option.preset?.payload ?? {};
+  const config={...defaultRrConfig(),...(payload.config ?? {})};
+  const overrides={
+    playerBands: payload.playerBands ?? RR_DEFAULT_PLAYER_BANDS,
+    sessionBands: payload.sessionBands ?? RR_DEFAULT_SESSION_BANDS,
+    tournamentTypeMultipliers: payload.typeMultipliers ?? RR_DEFAULT_TYPE_MULTIPLIERS,
+    specialCoefficients: payload.specialCoefficients ?? RR_DEFAULT_SPECIAL_COEFFICIENTS,
+  };
+  const events=orderedHistoryEvents();
+  const prefix: ResultInput[]=[];
+  const out: UnifiedHistorySnapshot[]=[];
+  events.forEach((event,index)=>{
+    prefix.push(...results.filter((row)=>String(row.tournament_id)===event.tournamentId && String(row.tournament_date)===event.tournamentDate && Number(row.tournament_order ?? 0)===event.tournamentOrder));
+    const result=new RrEngine(config,overrides).calculate(players,prefix,event.tournamentDate);
+    out.push({index,event,ranking:result.ranking.map((r)=>({rank:r.rank,playerId:r.playerId,playerName:r.playerName,rating:r.rating,tournamentsCount:r.tournamentsCount})),rrResult:result});
+  });
+  return out;
+}
+
+function applyHistoryPeriod(rows: UnifiedHistorySnapshot[]): UnifiedHistorySnapshot[] {
+  return rows.filter((s)=>(!historyPeriodStart || s.event.tournamentDate>=historyPeriodStart) && (!historyPeriodEnd || s.event.tournamentDate<=historyPeriodEnd))
+    .map((s,index)=>({...s,index}));
+}
+
 function ensureHistorySnapshots(): void {
   if (!historyDirty) return;
+  historySnapshots=applyHistoryPeriod(buildHistoryForMethod(historyMethodA));
+  historyReferenceSnapshots=applyHistoryPeriod(buildHistoryForMethod(historyMethodB));
+  historyDirty=false;
+  if (!historySnapshots.length) { historySnapshotIndex=0; historyPlayerId=null; return; }
+  historySnapshotIndex=Math.min(historySnapshotIndex,historySnapshots.length-1);
+  const latest=historySnapshots[historySnapshots.length-1];
+  if(!historyPlayerId || !latest.ranking.some((r)=>r.playerId===historyPlayerId)) historyPlayerId=latest.ranking[0]?.playerId ?? null;
+}
 
-  historySnapshots = simulateMcr2026History(
-    players,
-    results,
-    currentConfig,
-    historyOverrides(),
-    historyInitialMode,
-  );
-  historyReferenceSnapshots = simulateMcr2026History(
-    players,
-    results,
-    defaultMcr2026Config(),
-    {},
-    historyInitialMode,
-  );
-
-  historyDirty = false;
-
-  if (!historySnapshots.length) {
-    historySnapshotIndex = 0;
-    historyPlayerId = null;
-    return;
+function renderHistorySettings(): void {
+  const host=byId("historySettingsPanel");
+  if(!historySettingsOpen){host.innerHTML="";return;}
+  if(historySettingsOpen==="methods"){
+    const opts=historyMethodOptions();
+    const options=(selected:string)=>opts.map((o)=>`<option value="${esc(o.id)}" ${o.id===selected?"selected":""}>${esc(o.label)}</option>`).join("");
+    host.innerHTML=`<section class="history-card history-settings-card"><div class="history-settings-head"><strong>Методы для сравнения</strong><button id="closeHistorySettings" type="button">×</button></div><div class="history-settings-grid"><label>Метод 1<select id="historyMethodASelect">${options(historyMethodA)}</select></label><label>Метод 2<select id="historyMethodBSelect">${options(historyMethodB)}</select></label></div></section>`;
+    byId<HTMLSelectElement>("historyMethodASelect").onchange=(e)=>{historyMethodA=(e.currentTarget as HTMLSelectElement).value;historyDirty=true;historySnapshotIndex=0;renderHistoryWorkspace();};
+    byId<HTMLSelectElement>("historyMethodBSelect").onchange=(e)=>{historyMethodB=(e.currentTarget as HTMLSelectElement).value;historyDirty=true;historySnapshotIndex=0;renderHistoryWorkspace();};
+  } else {
+    const all=orderedHistoryEvents(); const min=all[0]?.tournamentDate??""; const max=all[all.length-1]?.tournamentDate??"";
+    host.innerHTML=`<section class="history-card history-settings-card"><div class="history-settings-head"><strong>Период истории</strong><button id="closeHistorySettings" type="button">×</button></div><div class="history-settings-grid"><label>Начало<input id="historyPeriodStart" type="date" min="${min}" max="${max}" value="${esc(historyPeriodStart||min)}"></label><label>Конец<input id="historyPeriodEnd" type="date" min="${min}" max="${max}" value="${esc(historyPeriodEnd||max)}"></label><button id="resetHistoryPeriod" type="button">Весь период</button></div></section>`;
+    byId<HTMLInputElement>("historyPeriodStart").onchange=(e)=>{historyPeriodStart=(e.currentTarget as HTMLInputElement).value;historyDirty=true;historySnapshotIndex=0;renderHistoryWorkspace();};
+    byId<HTMLInputElement>("historyPeriodEnd").onchange=(e)=>{historyPeriodEnd=(e.currentTarget as HTMLInputElement).value;historyDirty=true;historySnapshotIndex=0;renderHistoryWorkspace();};
+    byId<HTMLButtonElement>("resetHistoryPeriod").onclick=()=>{historyPeriodStart="";historyPeriodEnd="";historyDirty=true;historySnapshotIndex=0;renderHistoryWorkspace();};
   }
-
-  historySnapshotIndex = Math.min(historySnapshotIndex, historySnapshots.length - 1);
-
-  const latest = historySnapshots[historySnapshots.length - 1];
-  if (
-    !historyPlayerId
-    || !latest.result.ranking.some((row) => row.playerId === historyPlayerId)
-  ) {
-    historyPlayerId = latest.result.ranking[0]?.playerId ?? null;
-  }
+  byId<HTMLButtonElement>("closeHistorySettings").onclick=()=>{historySettingsOpen=null;renderHistorySettings();};
 }
 
 function renderHistoryWorkspace(): void {
   ensureHistorySnapshots();
-
-  const summary = byId("historySummary");
-  const slider = byId<HTMLInputElement>("historySlider");
-  const ticks = byId("historyTicks");
-  const select = byId<HTMLSelectElement>("historyPlayerSelect");
-
-  if (!historySnapshots.length) {
-    summary.innerHTML = `<div class="notice">Нет турниров для построения временной шкалы.</div>`;
-    ticks.innerHTML = "";
-    select.innerHTML = "";
-    byId("historyPlayerChart").innerHTML = "";
-    byId("historySnapshotPanel").innerHTML = "";
-    slider.min = "0";
-    slider.max = "0";
-    slider.value = "0";
-    return;
-  }
-
-  const first = historySnapshots[0].event;
-  const last = historySnapshots[historySnapshots.length - 1].event;
-
-  summary.innerHTML = `
-    <div class="history-stat"><span>Турниров</span><strong>${historySnapshots.length}</strong></div>
-    <div class="history-stat"><span>Период</span><strong>${esc(first.tournamentDate)} → ${esc(last.tournamentDate)}</strong></div>
-    <div class="history-stat"><span>Старт</span><strong>${historyInitialMode === "clean" ? "чистый" : "импортированный EU"}</strong></div>
-    <div class="history-stat"><span>Методы</span><strong>MCR-2026 exp. / default</strong></div>
-  `;
-
-  slider.min = "0";
-  slider.max = String(historySnapshots.length - 1);
-  slider.value = String(historySnapshotIndex);
-
-  ticks.innerHTML = historySnapshots.map((snapshot, i) => `
-    <button
-      type="button"
-      class="timeline-tick ${i === historySnapshotIndex ? "active" : ""}"
-      data-history-index="${i}"
-      title="${esc(snapshot.event.tournamentDate)} · ${esc(snapshot.event.tournamentName)}"
-      aria-label="${esc(snapshot.event.tournamentName)}"
-    >
-      <span></span>
-    </button>
-  `).join("");
-
-  ticks.querySelectorAll<HTMLButtonElement>("[data-history-index]").forEach((button) => {
-    button.addEventListener("click", () => {
-      historySnapshotIndex = Number(button.dataset.historyIndex);
-      historyExpandedPlayerId = null;
-      slider.value = String(historySnapshotIndex);
-      renderHistoryWorkspace();
-    });
-  });
-
-  const latestPlayers = historySnapshots[historySnapshots.length - 1].result.ranking;
-  select.innerHTML = latestPlayers.map((row) =>
-    `<option value="${esc(row.playerId)}" ${row.playerId === historyPlayerId ? "selected" : ""}>`
-    + `${esc(row.playerName)} · #${row.rank}</option>`
-  ).join("");
-
-  renderHistoryPlayerChart();
-  renderHistorySnapshot();
+  const summary=byId("historySummary"), slider=byId<HTMLInputElement>("historySlider"), ticks=byId("historyTicks"), select=byId<HTMLSelectElement>("historyPlayerSelect");
+  if(!historySnapshots.length){summary.innerHTML=`<div class="notice">Нет турниров для выбранного периода.</div>`;ticks.innerHTML="";select.innerHTML="";byId("historyPlayerChart").innerHTML="";byId("historySnapshotPanel").innerHTML="";slider.min="0";slider.max="0";slider.value="0";renderHistorySettings();return;}
+  const first=historySnapshots[0].event,last=historySnapshots[historySnapshots.length-1].event;
+  summary.innerHTML=`<div class="history-stat"><span>Турниров</span><strong>${historySnapshots.length}</strong></div>
+    <button class="history-stat history-stat-button" id="historyPeriodButton" type="button"><span>Период</span><strong>${esc(first.tournamentDate)} → ${esc(last.tournamentDate)}</strong></button>
+    <div class="history-stat"><span>Старт</span><strong>${historyInitialMode==="clean"?"чистый":"импортированный EU"}</strong></div>
+    <button class="history-stat history-stat-button" id="historyMethodsButton" type="button"><span>Методы</span><strong>${esc(historyMethodLabel(historyMethodA))} / ${esc(historyMethodLabel(historyMethodB))}</strong></button>`;
+  byId<HTMLButtonElement>("historyPeriodButton").onclick=()=>{historySettingsOpen=historySettingsOpen==="period"?null:"period";renderHistorySettings();};
+  byId<HTMLButtonElement>("historyMethodsButton").onclick=()=>{historySettingsOpen=historySettingsOpen==="methods"?null:"methods";renderHistorySettings();};
+  byId("historyChartMethodsLabel").textContent=`${historyMethodLabel(historyMethodA)} ↔ ${historyMethodLabel(historyMethodB)}`;
+  renderHistorySettings();
+  slider.min="0";slider.max=String(historySnapshots.length-1);slider.value=String(historySnapshotIndex);
+  ticks.innerHTML=historySnapshots.map((snap,i)=>`<button type="button" class="timeline-tick ${i===historySnapshotIndex?"active":""}" data-history-index="${i}" title="${esc(snap.event.tournamentDate)} · ${esc(snap.event.tournamentName)}"><span></span></button>`).join("");
+  ticks.querySelectorAll<HTMLButtonElement>("[data-history-index]").forEach((b)=>b.onclick=()=>{historySnapshotIndex=Number(b.dataset.historyIndex);historyExpandedPlayerId=null;slider.value=String(historySnapshotIndex);renderHistoryWorkspace();});
+  const latestPlayers=historySnapshots[historySnapshots.length-1].ranking;
+  select.innerHTML=latestPlayers.map((row)=>`<option value="${esc(row.playerId)}" ${row.playerId===historyPlayerId?"selected":""}>${esc(row.playerName)} · #${row.rank}</option>`).join("");
+  renderHistoryPlayerChart();renderHistorySnapshot();
 }
 
-function historySeriesForPlayer(
-  snapshots: RatingSnapshot[],
-  playerId: string,
-): { index: number; rank: number; rating: number; date: string }[] {
-  const points: { index: number; rank: number; rating: number; date: string }[] = [];
-  snapshots.forEach((snapshot, index) => {
-    const row = snapshot.result.ranking.find((x) => x.playerId === playerId);
-    if (row) {
-      points.push({
-        index,
-        rank: row.rank,
-        rating: row.rating,
-        date: snapshot.event.tournamentDate,
-      });
-    }
-  });
-  return points;
+function historySeriesForPlayer(snapshots: UnifiedHistorySnapshot[],playerId:string){
+  const points:{index:number;rank:number;rating:number;date:string}[]=[];
+  snapshots.forEach((snapshot,index)=>{const row=snapshot.ranking.find((x)=>x.playerId===playerId);if(row)points.push({index,rank:row.rank,rating:row.rating,date:snapshot.event.tournamentDate});});return points;
 }
 
-function svgPolyline(
-  series: { index: number; rank: number }[],
-  maxIndex: number,
-  maxRank: number,
-  width: number,
-  height: number,
-  padX: number,
-  padY: number,
-): string {
-  if (!series.length) return "";
-  const innerW = width - padX * 2;
-  const innerH = height - padY * 2;
-  return series.map((p) => {
-    const x = padX + (maxIndex > 0 ? (p.index / maxIndex) * innerW : innerW / 2);
-    const y = padY + (maxRank > 1 ? ((p.rank - 1) / (maxRank - 1)) * innerH : innerH / 2);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(" ");
+function svgPolyline(series:{index:number;rank:number}[],maxIndex:number,maxRank:number,width:number,height:number,padX:number,padY:number):string{
+  if(!series.length)return"";const innerW=width-padX*2,innerH=height-padY*2;return series.map((p)=>{const x=padX+(maxIndex>0?(p.index/maxIndex)*innerW:innerW/2);const y=padY+(maxRank>1?((p.rank-1)/(maxRank-1))*innerH:innerH/2);return`${x.toFixed(1)},${y.toFixed(1)}`;}).join(" ");
 }
 
-function renderHistoryPlayerChart(): void {
-  const host = byId("historyPlayerChart");
-  if (!historyPlayerId || !historySnapshots.length) {
-    host.innerHTML = `<div class="micro">Выберите игрока.</div>`;
-    return;
-  }
-
-  const exp = historySeriesForPlayer(historySnapshots, historyPlayerId);
-  const ref = historySeriesForPlayer(historyReferenceSnapshots, historyPlayerId);
-  const latest = historySnapshots[historySnapshots.length - 1].result.ranking
-    .find((x) => x.playerId === historyPlayerId);
-  const name = latest?.playerName ?? historyPlayerId;
-
-  const maxIndex = Math.max(1, historySnapshots.length - 1);
-  const maxRank = Math.max(
-    2,
-    ...exp.map((x) => x.rank),
-    ...ref.map((x) => x.rank),
-  );
-
-  const width = 1000;
-  const height = 220;
-  const padX = 46;
-  const padY = 22;
-  const expPoints = svgPolyline(exp, maxIndex, maxRank, width, height, padX, padY);
-  const refPoints = svgPolyline(ref, maxIndex, maxRank, width, height, padX, padY);
-  const selectedX = padX
-    + (historySnapshotIndex / maxIndex) * (width - padX * 2);
-
-  const selectedExp = historySnapshots[historySnapshotIndex]?.result.ranking
-    .find((x) => x.playerId === historyPlayerId);
-  const selectedRef = historyReferenceSnapshots[historySnapshotIndex]?.result.ranking
-    .find((x) => x.playerId === historyPlayerId);
-
-  host.innerHTML = `
-    <div class="chart-head">
-      <strong>${esc(name)}</strong>
-      <div class="chart-legend">
-        <span><i class="legend-line experimental"></i> экспериментальная</span>
-        <span><i class="legend-line reference"></i> MCR-2026 default</span>
-      </div>
-    </div>
-    <svg class="history-chart" viewBox="0 0 ${width} ${height}" role="img"
-      aria-label="Движение места игрока во времени">
-      <line x1="${padX}" y1="${padY}" x2="${padX}" y2="${height - padY}" class="chart-axis"/>
-      <line x1="${padX}" y1="${height - padY}" x2="${width - padX}" y2="${height - padY}" class="chart-axis"/>
-      <text x="8" y="${padY + 4}" class="chart-label">#1</text>
-      <text x="8" y="${height - padY + 4}" class="chart-label">#${maxRank}</text>
-      <line x1="${selectedX}" y1="${padY}" x2="${selectedX}" y2="${height - padY}" class="chart-cursor"/>
-      ${refPoints ? `<polyline points="${refPoints}" class="chart-series reference"/>` : ""}
-      ${expPoints ? `<polyline points="${expPoints}" class="chart-series experimental"/>` : ""}
-    </svg>
-    <div class="chart-selected">
-      <span>Точка ${historySnapshotIndex + 1}/${historySnapshots.length}</span>
-      <span>Эксп.: <strong>${selectedExp ? `#${selectedExp.rank} · ${fmt(selectedExp.rating)}` : "—"}</strong></span>
-      <span>Default: <strong>${selectedRef ? `#${selectedRef.rank} · ${fmt(selectedRef.rating)}` : "—"}</strong></span>
-    </div>
-  `;
+function renderHistoryPlayerChart():void{
+  const host=byId("historyPlayerChart");if(!historyPlayerId||!historySnapshots.length){host.innerHTML=`<div class="micro">Выберите игрока.</div>`;return;}
+  const a=historySeriesForPlayer(historySnapshots,historyPlayerId),b=historySeriesForPlayer(historyReferenceSnapshots,historyPlayerId);
+  const latest=historySnapshots[historySnapshots.length-1].ranking.find((x)=>x.playerId===historyPlayerId);const name=latest?.playerName??historyPlayerId;
+  const maxIndex=Math.max(1,historySnapshots.length-1),maxRank=Math.max(2,...a.map(x=>x.rank),...b.map(x=>x.rank));const width=1000,height=220,padX=46,padY=22;
+  const aPoints=svgPolyline(a,maxIndex,maxRank,width,height,padX,padY),bPoints=svgPolyline(b,maxIndex,maxRank,width,height,padX,padY);const selectedX=padX+(historySnapshotIndex/maxIndex)*(width-padX*2);
+  const selectedA=historySnapshots[historySnapshotIndex]?.ranking.find((x)=>x.playerId===historyPlayerId);const selectedB=historyReferenceSnapshots[historySnapshotIndex]?.ranking.find((x)=>x.playerId===historyPlayerId);
+  host.innerHTML=`<div class="chart-head"><strong>${esc(name)}</strong><div class="chart-legend"><span><i class="legend-line experimental"></i>${esc(historyMethodLabel(historyMethodA))}</span><span><i class="legend-line reference"></i>${esc(historyMethodLabel(historyMethodB))}</span></div></div>
+    <svg class="history-chart" viewBox="0 0 ${width} ${height}" role="img"><line x1="${padX}" y1="${padY}" x2="${padX}" y2="${height-padY}" class="chart-axis"/><line x1="${padX}" y1="${height-padY}" x2="${width-padX}" y2="${height-padY}" class="chart-axis"/><text x="8" y="${padY+4}" class="chart-label">#1</text><text x="8" y="${height-padY+4}" class="chart-label">#${maxRank}</text><line x1="${selectedX}" y1="${padY}" x2="${selectedX}" y2="${height-padY}" class="chart-cursor"/>${bPoints?`<polyline points="${bPoints}" class="chart-series reference"/>`:""}${aPoints?`<polyline points="${aPoints}" class="chart-series experimental"/>`:""}</svg>
+    <div class="chart-selected"><span>Точка ${historySnapshotIndex+1}/${historySnapshots.length}</span><span>${esc(historyMethodLabel(historyMethodA))}: <strong>${selectedA?`#${selectedA.rank} · ${fmt(selectedA.rating)}`:"—"}</strong></span><span>${esc(historyMethodLabel(historyMethodB))}: <strong>${selectedB?`#${selectedB.rank} · ${fmt(selectedB.rating)}`:"—"}</strong></span></div>`;
 }
 
-function renderHistorySnapshot(): void {
-  if (!historySnapshots.length) return;
+function historySortHeader(label:string,key:string):string{const active=historyTableSortKey===key;const arrow=active?(historyTableSortDir==="asc"?" ↑":" ↓"):"";return`<button class="sort-header" data-history-table-sort="${esc(key)}" type="button">${esc(label)}${arrow}</button>`;}
 
-  const snapshot = historySnapshots[historySnapshotIndex];
-  const refSnapshot = historyReferenceSnapshots[historySnapshotIndex];
-  const previous = historySnapshotIndex > 0
-    ? historySnapshots[historySnapshotIndex - 1]
-    : null;
-
-  const previousById = new Map(
-    (previous?.result.ranking ?? []).map((row) => [row.playerId, row]),
-  );
-  const refById = new Map(
-    (refSnapshot?.result.ranking ?? []).map((row) => [row.playerId, row]),
-  );
-
-  const movers = snapshot.result.ranking
-    .map((row) => {
-      const before = previousById.get(row.playerId);
-      const ref = refById.get(row.playerId);
-      return {
-        ...row,
-        movement: before ? before.rank - row.rank : 0,
-        previousRank: before?.rank ?? null,
-        refRank: ref?.rank ?? null,
-        refRating: ref?.rating ?? Number.NaN,
-      };
-    })
-    .sort((a, b) => Math.abs(b.movement) - Math.abs(a.movement) || a.rank - b.rank);
-
-  const details = snapshot.result.tournamentRows
-    .filter((row) => row.tournamentId === snapshot.event.tournamentId
-      && row.tournamentDate === snapshot.event.tournamentDate);
-  const kt = details[0]?.kt;
-  const meanEu = details[0]?.meanEuFinal;
-
-  byId<HTMLInputElement>("historySlider").value = String(historySnapshotIndex);
-  document.querySelectorAll(".timeline-tick").forEach((el, i) =>
-    el.classList.toggle("active", i === historySnapshotIndex)
-  );
-
-  byId("historySnapshotPanel").innerHTML = `
-    <div class="snapshot-head">
-      <div>
-        <div class="snapshot-step">Шаг ${historySnapshotIndex + 1} из ${historySnapshots.length}</div>
-        <h2>${esc(snapshot.event.tournamentName)}</h2>
-        <div class="reference-labels">
-          <span>${esc(snapshot.event.tournamentDate)}</span>
-          <span>${snapshot.event.participants} игроков</span>
-          <span>${snapshot.event.sessions} сессий</span>
-          <span>KT: <strong>${kt === undefined ? "—" : fmt(kt)}</strong></span>
-          <span>ср. EU: <strong>${meanEu === undefined ? "—" : fmt(meanEu, 0)}</strong></span>
-        </div>
-      </div>
-    </div>
-
-    <div class="snapshot-grid">
-      <div>
-        <div class="snapshot-subtitle">Наибольшие движения после турнира</div>
-        <div class="table-wrap snapshot-movers-wrap">
-          <table class="snapshot-table">
-            <thead><tr><th>Игрок</th><th>До</th><th>После</th><th>Δ место</th><th>Rating</th></tr></thead>
-            <tbody>
-              ${movers.slice(0, 10).map((row) => `<tr>
-                <td>${esc(row.playerName)}</td>
-                <td>${row.previousRank ? `#${row.previousRank}` : "new"}</td>
-                <td>#${row.rank}</td>
-                <td class="${row.movement > 0 ? "pos" : row.movement < 0 ? "neg" : ""}">
-                  ${row.movement > 0 ? "+" : ""}${row.movement}
-                </td>
-                <td>${fmt(row.rating)}</td>
-              </tr>`).join("")}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div>
-        <div class="snapshot-subtitle">Рейтинг после этого шага</div>
-        <div class="table-wrap snapshot-ranking-wrap">
-          <table class="ranking-table snapshot-ranking-table">
-            <thead><tr>
-              <th>#</th><th class="player-col">Игрок</th><th>Уровень</th><th>EU</th><th>Турниров</th><th>T5</th>
-              <th>Rating</th><th>Эталон</th><th>Δ Rating</th><th>Δ место</th>
-            </tr></thead>
-            <tbody>
-              ${snapshot.result.ranking.map((row) => {
-                const ref = refById.get(row.playerId);
-                const deltaRating = ref ? row.rating - ref.rating : Number.NaN;
-                const deltaRank = ref ? ref.rank - row.rank : 0;
-                const expanded = historyExpandedPlayerId === row.playerId;
-                return `
-                  <tr class="${expanded ? "expanded-player-row" : ""}">
-                    <td>${row.rank}</td>
-                    <td class="player-name-cell">
-                      <button class="player-link history-player-link"
-                        data-history-player-id="${esc(row.playerId)}"
-                        type="button" title="${esc(row.playerName)}">
-                        <span>${esc(row.playerName)}</span>
-                        <span class="player-expand-icon">${expanded ? "▾" : "›"}</span>
-                      </button>
-                    </td>
-                    <td>${esc(row.level)}</td>
-                    <td>${row.currentEu}</td>
-                    <td>${row.tournamentsCount}</td>
-                    <td>${fmt(row.t5, 1)}</td>
-                    <td class="emph">${fmt(row.rating)}</td>
-                    <td>${ref ? fmt(ref.rating) : "—"}</td>
-                    <td class="${deltaRating > 0 ? "pos" : deltaRating < 0 ? "neg" : ""}">
-                      ${Number.isFinite(deltaRating) ? `${deltaRating >= 0 ? "+" : ""}${fmt(deltaRating)}` : "—"}
-                    </td>
-                    <td class="${deltaRank > 0 ? "pos" : deltaRank < 0 ? "neg" : ""}">
-                      ${ref ? `${deltaRank >= 0 ? "+" : ""}${deltaRank}` : "—"}
-                    </td>
-                  </tr>
-                  ${expanded ? `
-                    <tr class="player-detail-row" data-history-expanded-player="${esc(row.playerId)}">
-                      <td colspan="10">${playerDetailHtml(row.playerId, snapshot.result, currentConfig.topN)}</td>
-                    </tr>
-                  ` : ""}
-                `;
-              }).join("")}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  `;
-
-  byId("historySnapshotPanel")
-    .querySelectorAll<HTMLButtonElement>("[data-history-player-id]")
-    .forEach((button) => {
-      button.addEventListener("click", () => {
-        const playerId = button.dataset.historyPlayerId!;
-        historyExpandedPlayerId = historyExpandedPlayerId === playerId ? null : playerId;
-        renderHistorySnapshot();
-
-        if (historyExpandedPlayerId) {
-          requestAnimationFrame(() => {
-            document
-              .querySelector(`[data-history-expanded-player="${CSS.escape(historyExpandedPlayerId!)}"]`)
-              ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-          });
-        }
-      });
-    });
-
+function renderHistorySnapshot():void{
+  if(!historySnapshots.length)return;const snapshot=historySnapshots[historySnapshotIndex],other=historyReferenceSnapshots[historySnapshotIndex];const previous=historySnapshotIndex>0?historySnapshots[historySnapshotIndex-1]:null;
+  const previousById=new Map((previous?.ranking??[]).map(r=>[r.playerId,r]));const otherById=new Map((other?.ranking??[]).map(r=>[r.playerId,r]));
+  const movers=snapshot.ranking.map(row=>{const before=previousById.get(row.playerId);return{...row,movement:before?before.rank-row.rank:0,previousRank:before?.rank??null};}).sort((a,b)=>Math.abs(b.movement)-Math.abs(a.movement)||a.rank-b.rank);
+  let tableRows=snapshot.ranking.map((row)=>{const b=otherById.get(row.playerId);return{playerId:row.playerId,playerName:row.playerName,rankA:row.rank,ratingA:row.rating,tournamentsCount:row.tournamentsCount,rankB:b?.rank??null,ratingB:b?.rating??null,deltaRating:b?row.rating-b.rating:null,deltaRank:b?b.rank-row.rank:null};});
+  tableRows.sort((a:any,b:any)=>{const av=a[historyTableSortKey],bv=b[historyTableSortKey];if(av===null||av===undefined)return 1;if(bv===null||bv===undefined)return-1;const cmp=typeof av==="string"?String(av).localeCompare(String(bv),"ru"):Number(av)-Number(bv);return historyTableSortDir==="asc"?cmp:-cmp;});
+  byId<HTMLInputElement>("historySlider").value=String(historySnapshotIndex);document.querySelectorAll(".timeline-tick").forEach((el,i)=>el.classList.toggle("active",i===historySnapshotIndex));
+  const nameA=historyMethodLabel(historyMethodA),nameB=historyMethodLabel(historyMethodB);
+  byId("historySnapshotPanel").innerHTML=`<div class="snapshot-head"><div><div class="snapshot-step">Шаг ${historySnapshotIndex+1} из ${historySnapshots.length}</div><h2>${esc(snapshot.event.tournamentName)}</h2><div class="reference-labels"><span>${esc(snapshot.event.tournamentDate)}</span><span>${snapshot.event.participants} игроков</span><span>${snapshot.event.sessions} сессий</span><span>${esc(nameA)} ↔ ${esc(nameB)}</span></div></div></div>
+    <div class="snapshot-grid"><div><div class="snapshot-subtitle">Наибольшие движения после турнира · ${esc(nameA)}</div><div class="table-wrap snapshot-movers-wrap"><table class="snapshot-table"><thead><tr><th>Игрок</th><th>До</th><th>После</th><th>Δ место</th><th>Rating</th></tr></thead><tbody>${movers.slice(0,10).map(row=>`<tr><td>${esc(row.playerName)}</td><td>${row.previousRank?`#${row.previousRank}`:"new"}</td><td>#${row.rank}</td><td class="${row.movement>0?"pos":row.movement<0?"neg":""}">${row.movement>0?"+":""}${row.movement}</td><td>${fmt(row.rating)}</td></tr>`).join("")}</tbody></table></div></div>
+      <div><div class="snapshot-subtitle snapshot-title-row"><span>Рейтинг после этого шага</span><button id="exportHistorySnapshotCsv" class="download-button" type="button">↓ CSV</button></div><div class="table-wrap snapshot-ranking-wrap"><table class="ranking-table snapshot-ranking-table"><thead><tr><th>${historySortHeader(`# ${nameA}`,"rankA")}</th><th>${historySortHeader("Игрок","playerName")}</th><th>${historySortHeader(`Rating · ${nameA}`,"ratingA")}</th><th>${historySortHeader(`# ${nameB}`,"rankB")}</th><th>${historySortHeader(`Rating · ${nameB}`,"ratingB")}</th><th>${historySortHeader("Δ Rating","deltaRating")}</th><th>${historySortHeader("Δ место","deltaRank")}</th></tr></thead><tbody>${tableRows.map((row:any)=>`<tr><td>${row.rankA}</td><td>${esc(row.playerName)}</td><td class="emph">${fmt(row.ratingA)}</td><td>${row.rankB??"—"}</td><td>${row.ratingB===null?"—":fmt(row.ratingB)}</td><td class="${row.deltaRating>0?"pos":row.deltaRating<0?"neg":""}">${row.deltaRating===null?"—":`${row.deltaRating>=0?"+":""}${fmt(row.deltaRating)}`}</td><td class="${row.deltaRank>0?"pos":row.deltaRank<0?"neg":""}">${row.deltaRank===null?"—":`${row.deltaRank>=0?"+":""}${row.deltaRank}`}</td></tr>`).join("")}</tbody></table></div></div></div>`;
+  const panel=byId("historySnapshotPanel");panel.querySelectorAll<HTMLButtonElement>("[data-history-table-sort]").forEach((b)=>b.onclick=()=>{const key=b.dataset.historyTableSort!;if(historyTableSortKey===key)historyTableSortDir=historyTableSortDir==="asc"?"desc":"asc";else{historyTableSortKey=key;historyTableSortDir="asc";}renderHistorySnapshot();});
+  byId<HTMLButtonElement>("exportHistorySnapshotCsv").onclick=()=>{const lines=[["player_id","player_name",`rank_${nameA}`,`rating_${nameA}`,`rank_${nameB}`,`rating_${nameB}`,"delta_rating_A_minus_B","delta_rank_B_minus_A"].map(csvCell).join(","),...tableRows.map((r:any)=>[r.playerId,r.playerName,r.rankA,r.ratingA,r.rankB??"",r.ratingB??"",r.deltaRating??"",r.deltaRank??""].map(csvCell).join(","))];downloadTextFile(`history-comparison-${snapshot.event.tournamentDate}-${snapshot.event.tournamentId}.csv`,lines.join("\r\n"));};
   renderHistoryPlayerChart();
 }
 
