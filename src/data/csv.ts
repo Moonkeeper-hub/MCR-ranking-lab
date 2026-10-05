@@ -59,13 +59,6 @@ export function resultsFromCsv(text: string): ResultInput[] {
     }
   }
 
-  if (
-    rows.length
-    && !("is_status_tournament" in rows[0])
-    && !("is_world_europe" in rows[0])
-  ) {
-    throw new Error("results.csv: нет колонки is_status_tournament");
-  }
 
   return rows.map((r) => ({
     ...r,

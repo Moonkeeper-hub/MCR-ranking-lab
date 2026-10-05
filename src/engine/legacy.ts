@@ -11,6 +11,7 @@ import type {
   ResultInput,
   TableOverrides,
   TournamentDetail,
+  MethodDiagnostic,
 } from "./types";
 
 function parseDate(value: string | Date): Date {
@@ -60,12 +61,38 @@ export class Mcr2026Engine {
 
   playerCountComponent(participants: number): number {
     const exact = this.ktParticipants[participants];
-    if (exact === undefined) {
-      throw new Error(
-        `MCR-2026: ЧУТ=${participants} отсутствует в нормативной таблице KT_ЧУТ`,
-      );
+    if (exact !== undefined) return exact * this.config.playerCountScale;
+
+    const keys = Object.keys(this.ktParticipants).map(Number).sort((a, b) => a - b);
+    if (!keys.length) throw new Error("MCR-2026: таблица KT_ЧУТ пуста");
+
+    if (this.config.participantCountPolicy === "strict" || this.config.participantCountPolicy === "skip") {
+      throw new Error(`MCR-2026: ЧУТ=${participants} отсутствует в нормативной таблице KT_ЧУТ`);
     }
-    return exact * this.config.playerCountScale;
+
+    const lower = [...keys].reverse().find((x) => x < participants);
+    const upper = keys.find((x) => x > participants);
+
+    if (this.config.participantCountPolicy === "lower") {
+      const key = lower ?? keys[0];
+      return this.ktParticipants[key] * this.config.playerCountScale;
+    }
+
+    if (this.config.participantCountPolicy === "nearest") {
+      if (lower === undefined) return this.ktParticipants[keys[0]] * this.config.playerCountScale;
+      if (upper === undefined) return this.ktParticipants[keys[keys.length - 1]] * this.config.playerCountScale;
+      const key = (participants - lower) <= (upper - participants) ? lower : upper;
+      return this.ktParticipants[key] * this.config.playerCountScale;
+    }
+
+    // Linear interpolation between the neighboring normative rows. Outside
+    // the table range we clamp to the nearest endpoint rather than extrapolate.
+    if (lower === undefined) return this.ktParticipants[keys[0]] * this.config.playerCountScale;
+    if (upper === undefined) return this.ktParticipants[keys[keys.length - 1]] * this.config.playerCountScale;
+    const y0 = this.ktParticipants[lower];
+    const y1 = this.ktParticipants[upper];
+    const t = (participants - lower) / (upper - lower);
+    return (y0 + (y1 - y0) * t) * this.config.playerCountScale;
   }
 
   euComponent(meanEu: number): number {
@@ -195,6 +222,19 @@ export class Mcr2026Engine {
     }
   }
 
+  private participantCountDiagnostic(row: ResultInput): MethodDiagnostic | null {
+    const participants = Number(row.participants);
+    if (this.ktParticipants[participants] !== undefined) return null;
+    return {
+      level: this.config.participantCountPolicy === "strict" ? "error" : "warning",
+      code: "mcr-participants-not-in-table",
+      message: `ЧУТ=${participants} отсутствует в нормативной таблице KT_ЧУТ`,
+      tournamentId: String(row.tournament_id),
+      tournamentName: String(row.tournament_name),
+      tournamentDate: String(row.tournament_date),
+    };
+  }
+
   calculate(
     playersInput: PlayerInput[],
     resultsInput: ResultInput[],
@@ -204,7 +244,7 @@ export class Mcr2026Engine {
     const evaluationDate = parseDate(evaluationDateInput);
 
     // Historical cutoff: future tournaments do not exist for this calculation.
-    const results = resultsInput
+    const normalizedResults = resultsInput
       .map((r) => ({
         ...r,
         player_id: String(r.player_id),
@@ -216,6 +256,27 @@ export class Mcr2026Engine {
         is_substitute: Boolean(r.is_substitute),
       }))
       .filter((r) => parseDate(r.tournament_date).getTime() <= evaluationDate.getTime());
+
+    const diagnostics: MethodDiagnostic[] = [];
+    const invalidTournamentKeys = new Set<string>();
+    const seenTournamentKeys = new Set<string>();
+    for (const row of normalizedResults) {
+      const key = `${row.tournament_date}\u0000${row.tournament_order ?? 0}\u0000${row.tournament_id}`;
+      if (seenTournamentKeys.has(key)) continue;
+      seenTournamentKeys.add(key);
+      const diagnostic = this.participantCountDiagnostic(row);
+      if (diagnostic) {
+        diagnostics.push(diagnostic);
+        if (this.config.participantCountPolicy === "strict" || this.config.participantCountPolicy === "skip") {
+          invalidTournamentKeys.add(key);
+        }
+      }
+    }
+
+    const results = normalizedResults.filter((row) => {
+      const key = `${row.tournament_date}\u0000${row.tournament_order ?? 0}\u0000${row.tournament_id}`;
+      return !invalidTournamentKeys.has(key);
+    });
 
     const activePlayerIds = new Set(results.map((r) => r.player_id));
     const players = playersInput
@@ -471,6 +532,13 @@ export class Mcr2026Engine {
       row.rank = i + 1;
     });
 
-    return { ranking, tournamentRows: details };
+    return {
+      ranking,
+      tournamentRows: details,
+      diagnostics,
+      isComplete: this.config.participantCountPolicy === "strict" ? invalidTournamentKeys.size === 0 : true,
+      processedTournamentCount: tournamentMeta.length,
+      skippedTournamentCount: invalidTournamentKeys.size,
+    };
   }
 }

@@ -108,73 +108,20 @@ export function renderMcr2026Math(config: Mcr2026Config): string {
 import type { RrConfig } from "../engine/rr";
 
 export function renderRrMath(config: RrConfig): string {
-  const w1 = n(config.firstPartWeight);
-  const w2 = n(config.secondPartWeight);
-  const scale = String(Math.round(config.baseRankScale));
-  const base = String(config.firstPartBaseTournaments);
-  const share = n(config.firstPartAdditionalShare);
-  const best = String(config.secondPartBestTournaments);
+  const w1=n(config.firstPartWeight), w2=n(config.secondPartWeight);
+  const scale=String(Math.round(config.baseRankScale));
+  const base=String(config.firstPartBaseTournaments), share=n(config.firstPartAdditionalShare);
+  const best=String(config.secondPartBestTournaments);
 
-  const rating = render(String.raw`
-    \mathrm{RR}
-    =
-    ${hotspot(w1, "rrW1")}\,${hotspot("P_1", "rrP1")}
-    +
-    ${hotspot(w2, "rrW2")}\,${hotspot("P_2", "rrP2")}
-  `);
-
-  const br = render(String.raw`
-    ${hotspot("BR_i", "rrBR")}
-    =
-    ${hotspot(scale, "rrScale")}
-    \frac{${hotspot("N_i", "rrN")}-${hotspot("p_i", "rrPlace")}}{${hotspot("N_i", "rrN")}-1}
-  `);
-
-  const delta = render(String.raw`
-    ${hotspot("D_i", "rrDelta")}
-    =
-    ${hotspot("BR_i", "rrBR")}
-    \cdot
-    \Bigl(${hotspot("K_N(N_i)", "rrKN")}+${hotspot("K_S(S_i)", "rrKS")}\Bigr)
-    \cdot
-    ${hotspot("K_T(type_i)", "rrType")}
-    \cdot
-    ${hotspot("A_i", "rrAge")}
-  `);
-
-  const count = render(String.raw`
-    ${hotspot("m(T)", "rrM")}
-    =
-    \begin{cases}
-      T, & T\le ${hotspot(base, "rrBaseCount")}\\
-      ${hotspot(base, "rrBaseCount")}+\left\lceil ${hotspot(share, "rrShare")}\,(T-${hotspot(base, "rrBaseCount")})\right\rceil,
-      & T>${hotspot(base, "rrBaseCount")}
-    \end{cases}
-  `);
-
-  const p1 = render(String.raw`
-    ${hotspot("P_1", "rrP1")}
-    =
-    \max_{|S|=${hotspot("m(T)", "rrM")}}
-    \frac{\sum_{i\in S}${hotspot("D_i", "rrDelta")}}
-    {\sum_{i\in S}${hotspot("K_i A_i", "rrWeightedK")}+${hotspot("F", "rrFill")}}
-  `);
-
-  const p2 = render(String.raw`
-    ${hotspot("P_2", "rrP2")}
-    =
-    \frac{\sum_{i\in \mathrm{Top}${hotspot(best, "rrBestCount")}(D)} ${hotspot("D_i", "rrDelta")}}
-    {\sum_{j=1}^{${hotspot(best, "rrBestCount")}} ${hotspot("C_j^{\max}", "rrMaxCoef")}}
-  `);
-
-  return `
-    <div class="math-formula-stack">
-      <div class="math-line math-line-primary">${rating}</div>
-      <div class="math-line math-line-secondary">${br}</div>
-      <div class="math-line">${delta}</div>
-      <div class="math-line math-line-secondary">${count}</div>
-      <div class="math-line">${p1}</div>
-      <div class="math-line">${p2}</div>
-    </div>
-  `;
+  const rating=render(String.raw`\mathrm{RR}=${hotspot(w1,"rrW1")}\,${hotspot("A","rrP1")}+${hotspot(w2,"rrW2")}\,${hotspot("B","rrP2")}`);
+  const br=render(String.raw`${hotspot("R_i","rrBR")}=${hotspot(scale,"rrScale")}\cdot\frac{${hotspot("N_i","rrN")}-${hotspot("p_i","rrPlace")}}{${hotspot("N_i","rrN")}-1}`);
+  const weight=render(String.raw`${hotspot("W_i","rrW")}=${hotspot("K_N(N_i)","rrKN")}+${hotspot("K_H(H_i)","rrKS")}`);
+  const cut=render(String.raw`${hotspot("W_i^{cut}","rrCut")}=${hotspot("K_N(N)","rrKN")}+\frac{${hotspot("K_H(H_i)","rrKS")}+\overline{${hotspot("K_H","rrKS")}}}{2}`);
+  const delta=render(String.raw`${hotspot("D_i","rrDelta")}=${hotspot("R_i","rrBR")}\cdot${hotspot("W_i","rrW")}\cdot${hotspot("A_i","rrAge")}`);
+  const age=render(String.raw`${hotspot("A(m)","rrAge")}=\begin{cases}1,&m<${hotspot(String(config.ageFullMonths),"rrAge")}\\\max\!\left(0,1-\left\lceil\frac{m-${hotspot(String(config.ageFullMonths),"rrAge")}}{${hotspot(String(config.ageStepMonths),"rrAge")}}\right\rceil\cdot${hotspot(n(config.ageStepDrop,4),"rrAge")}\right),&${hotspot(String(config.ageFullMonths),"rrAge")}\le m<${hotspot(String(config.ageZeroMonths),"rrAge")}\\0,&m\ge${hotspot(String(config.ageZeroMonths),"rrAge")}\end{cases}`);
+  const count=render(String.raw`${hotspot("m(T)","rrM")}=\begin{cases}T,&T\le${hotspot(base,"rrBaseCount")}\\${hotspot(base,"rrBaseCount")}+\left\lceil${hotspot(share,"rrShare")}(T-${hotspot(base,"rrBaseCount")})\right\rceil,&T>${hotspot(base,"rrBaseCount")}\end{cases}`);
+  const p1=render(String.raw`${hotspot("A","rrP1")} = \max_{|S|=${hotspot("m(T)","rrM")}}\frac{\sum_{i\in S}${hotspot("D_i","rrDelta")}}{\sum_{i\in S}${hotspot("W_iA_i","rrWeightedK")}+\bigl(${hotspot(base,"rrBaseCount")}-|S|\bigr)_+${hotspot("F","rrFill")}}`);
+  const p2=render(String.raw`${hotspot("B","rrP2")} = \frac{\sum_{i\in \mathrm{Top}${hotspot(best,"rrBestCount")}(D)}${hotspot("D_i","rrDelta")}}{\sum_{j=1}^{${hotspot(best,"rrBestCount")}}${hotspot("MAXK_j","rrMaxCoef")}}`);
+  return `<div class="math-formula-stack"><div class="math-line math-line-primary">${rating}</div><div class="math-line math-line-secondary">${br}</div><div class="math-line">${weight}</div><div class="math-line math-line-secondary">${cut}</div><div class="math-line">${delta}</div><div class="math-line math-line-secondary">${age}</div><div class="math-line math-line-secondary">${count}</div><div class="math-line">${p1}</div><div class="math-line">${p2}</div></div>`;
 }
+

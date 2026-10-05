@@ -1142,3 +1142,9 @@ td.neg { color: var(--negative); }
 .comparison-next-card { margin-top: 14px; }
 #rrScalarControls .control-row { margin-bottom: 10px; }
 #rrPlayerBands input, #rrSessionBands input, #rrTypeMultipliers input { width: 92px; }
+
+/* v0.28.2 — unified comparison/history + multi-method lab */
+.comparison-main{max-width:1500px;margin:0 auto;padding:16px;display:grid;gap:14px}.comparison-toolbar{display:flex;justify-content:flex-end;margin:8px 0 12px}.comparison-toolbar label,.preset-box label{display:grid;gap:6px;font-size:12px}.comparison-toolbar select,.method-picker select,.preset-box select,.preset-save-row input{min-height:34px}.method-picker{border-bottom:1px solid var(--line,rgba(127,127,127,.2));margin-bottom:6px}.preset-box{display:grid;gap:8px}.preset-save-row{display:grid;grid-template-columns:1fr auto auto;gap:6px}.history-embedded{margin-top:4px}.rr-about{line-height:1.55}.inspector-table{grid-column:1/-1;display:grid;gap:8px;min-width:0}.formula-inspector .inspector-table .table-wrap{max-height:310px;overflow:auto}.formula-hotspot{cursor:pointer}.formula-hotspot:hover{filter:brightness(1.15)}
+
+/* v0.28.3 — method-specific validation */
+.method-validation-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;margin:0 0 12px}.method-validation{border:1px solid var(--line,rgba(127,127,127,.25));border-radius:10px;padding:10px 12px;display:grid;gap:6px;background:rgba(127,127,127,.04)}.method-validation>div:first-child{display:flex;justify-content:space-between;gap:12px;align-items:baseline}.method-validation.good{border-color:rgba(72,187,120,.35)}.method-validation.warn{border-color:rgba(236,201,75,.45)}.method-validation.error{border-color:rgba(245,101,101,.48)}.method-validation ul{margin:2px 0 0 18px;padding:0;font-size:12px;line-height:1.45}.notice.error{border-color:rgba(245,101,101,.48)}

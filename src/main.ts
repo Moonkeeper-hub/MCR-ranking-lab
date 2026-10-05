@@ -43,9 +43,14 @@ let rrSessionBands: RrRangeBand[] = RR_DEFAULT_SESSION_BANDS.map((x) => ({ ...x 
 let rrTypeMultipliers: Record<string, number> = { ...RR_DEFAULT_TYPE_MULTIPLIERS };
 let rrSpecialCoefficients: RrSpecialCoefficient[] = RR_DEFAULT_SPECIAL_COEFFICIENTS.map((x) => ({ ...x }));
 let rrCurrent: RrCalculationResult | null = null;
+let rrReference: RrCalculationResult | null = null;
 let dataLabel = "встроенный demo dataset";
+let evaluationDateState = todayIso();
 let activeFormulaToken: string | null = null;
+let activeRrFormulaToken: string | null = null;
 let activeReferenceTab = 0;
+let activeLabMethod: "mcr" | "rr" = "mcr";
+let comparisonPresetId = "";
 
 type RankingSortKey =
   | "rank"
@@ -64,7 +69,7 @@ let rankingSortKey: RankingSortKey = "rank";
 let rankingSortDir: "asc" | "desc" = "asc";
 let expandedPlayerId: string | null = null;
 
-let activeWorkspace: "comparison" | "history" | "lab" = "comparison";
+let activeWorkspace: "comparison" | "lab" = "comparison";
 let historyInitialMode: InitialStateMode = "clean";
 let historySnapshots: RatingSnapshot[] = [];
 let historyReferenceSnapshots: RatingSnapshot[] = [];
@@ -89,35 +94,131 @@ function byId<T extends HTMLElement>(id: string): T {
   return document.getElementById(id) as T;
 }
 
+
+interface SavedLabPreset {
+  id: string;
+  name: string;
+  method: "mcr" | "rr";
+  savedAt: string;
+  payload: any;
+}
+
+const PRESET_STORAGE_KEY = "mcr-rating-lab-presets-v1";
+
+function loadPresets(): SavedLabPreset[] {
+  try {
+    const raw = localStorage.getItem(PRESET_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function storePresets(items: SavedLabPreset[]): void {
+  try { localStorage.setItem(PRESET_STORAGE_KEY, JSON.stringify(items)); } catch { /* local-only convenience */ }
+}
+
+function captureCurrentPreset(name: string): SavedLabPreset {
+  const id = `preset-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  if (activeLabMethod === "mcr") {
+    return { id, name, method: "mcr", savedAt: new Date().toISOString(), payload: {
+      config: { ...currentConfig },
+      useKtExperiment, useVtExperiment,
+      ktExperiment: { ...ktExperiment },
+      vtExperiment: vtExperiment.map((x) => ({ ...x })),
+    }};
+  }
+  return { id, name, method: "rr", savedAt: new Date().toISOString(), payload: {
+    config: { ...rrConfig },
+    playerBands: rrPlayerBands.map((x) => ({ ...x })),
+    sessionBands: rrSessionBands.map((x) => ({ ...x })),
+    typeMultipliers: { ...rrTypeMultipliers },
+    specialCoefficients: rrSpecialCoefficients.map((x) => ({ ...x })),
+  }};
+}
+
+function applyPreset(preset: SavedLabPreset): void {
+  activeLabMethod = preset.method;
+  if (preset.method === "mcr") {
+    currentConfig = { ...defaultMcr2026Config(), ...(preset.payload?.config ?? {}) };
+    useKtExperiment = Boolean(preset.payload?.useKtExperiment);
+    useVtExperiment = Boolean(preset.payload?.useVtExperiment);
+    ktExperiment = { ...KT_PARTICIPANTS, ...(preset.payload?.ktExperiment ?? {}) };
+    vtExperiment = Array.isArray(preset.payload?.vtExperiment)
+      ? preset.payload.vtExperiment.map((x: any) => ({ ...x }))
+      : MCR2026_AGE_WEIGHTS.map((x) => ({ ...x }));
+  } else {
+    rrConfig = { ...defaultRrConfig(), ...(preset.payload?.config ?? {}) };
+    rrPlayerBands = (preset.payload?.playerBands ?? RR_DEFAULT_PLAYER_BANDS).map((x: RrRangeBand) => ({ ...x }));
+    rrSessionBands = (preset.payload?.sessionBands ?? RR_DEFAULT_SESSION_BANDS).map((x: RrRangeBand) => ({ ...x }));
+    rrTypeMultipliers = { ...RR_DEFAULT_TYPE_MULTIPLIERS, ...(preset.payload?.typeMultipliers ?? {}) };
+    rrSpecialCoefficients = (preset.payload?.specialCoefficients ?? RR_DEFAULT_SPECIAL_COEFFICIENTS).map((x: RrSpecialCoefficient) => ({ ...x }));
+  }
+}
+
 function recalc(): void {
-  const evaluationDate = byId<HTMLInputElement>("evaluationDate")?.value || todayIso();
+  const evaluationDate = document.querySelector<HTMLInputElement>("#evaluationDate")?.value || evaluationDateState;
+  evaluationDateState = evaluationDate;
   const overrides: TableOverrides = {};
   if (useKtExperiment) overrides.ktParticipants = ktExperiment;
   if (useVtExperiment) overrides.ageWeights = vtExperiment;
 
+  const errors: string[] = [];
+
   try {
     current = new Mcr2026Engine(currentConfig, overrides).calculate(players, results, evaluationDate);
+  } catch (error) {
+    current = null;
+    errors.push(`MCR lab: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
     reference = new Mcr2026Engine(defaultMcr2026Config()).calculate(players, results, evaluationDate);
+  } catch (error) {
+    reference = null;
+    errors.push(`MCR-2026 default: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
     rrCurrent = new RrEngine(rrConfig, {
       playerBands: rrPlayerBands,
       sessionBands: rrSessionBands,
       tournamentTypeMultipliers: rrTypeMultipliers,
       specialCoefficients: rrSpecialCoefficients,
     }).calculate(players, results, evaluationDate);
-    historyDirty = true;
-    syncAllControlValues();
-    renderFormulaMath();
-    renderOutput();
-    renderComparison();
-    if (activeWorkspace === "history") renderHistoryWorkspace();
-    const visibleResults = results.filter((r) => String(r.tournament_date) <= evaluationDate).length;
-    setStatus(
-      `Срез ${evaluationDate}: ${current.ranking.length} игроков, ${visibleResults} результатов`,
-      true,
-    );
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), false);
+    rrCurrent = null;
+    errors.push(`RR lab: ${error instanceof Error ? error.message : String(error)}`);
   }
+
+  try {
+    rrReference = new RrEngine(defaultRrConfig(), {
+      playerBands: RR_DEFAULT_PLAYER_BANDS,
+      sessionBands: RR_DEFAULT_SESSION_BANDS,
+      tournamentTypeMultipliers: RR_DEFAULT_TYPE_MULTIPLIERS,
+      specialCoefficients: RR_DEFAULT_SPECIAL_COEFFICIENTS,
+    }).calculate(players, results, evaluationDate);
+  } catch (error) {
+    rrReference = null;
+    errors.push(`RR default: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  historyDirty = true;
+  syncAllControlValues();
+  renderFormulaMath();
+  renderOutput();
+  renderComparison();
+  if (activeWorkspace === "comparison") renderHistoryWorkspace();
+
+  const visibleResults = results.filter((r) => String(r.tournament_date) <= evaluationDate).length;
+  const mcrText = reference
+    ? `MCR ${reference.isComplete === false ? "⚠ неполный" : "✓"}: ${reference.ranking.length}`
+    : "MCR ✕";
+  const rrText = rrReference ? `RR ✓: ${rrReference.ranking.length}` : "RR ✕";
+  const detail = errors.length ? ` · ${errors.join(" · ")}` : "";
+  setStatus(`Срез ${evaluationDate}: ${visibleResults} результатов · ${mcrText} · ${rrText}${detail}`, errors.length === 0);
 }
 
 function setStatus(text: string, ok = true): void {
@@ -243,6 +344,10 @@ const RR_CONTROL_DEFS: { key: RrNumericKey; label: string; min: number; max: num
   { key: "ageStepDrop", label: "Падение веса за шаг", min: 0, max: 0.5, step: 0.01 },
 ];
 
+function rrDef(key: RrNumericKey) {
+  return RR_CONTROL_DEFS.find((x) => x.key === key)!;
+}
+
 function rrControlHtml(def: typeof RR_CONTROL_DEFS[number]): string {
   const value = Number(rrConfig[def.key]);
   const digits = def.digits ?? 2;
@@ -254,8 +359,7 @@ function rrControlHtml(def: typeof RR_CONTROL_DEFS[number]): string {
 
 function renderRrControls(): void {
   const scalars = document.querySelector<HTMLDivElement>("#rrScalarControls");
-  if (!scalars) return;
-  scalars.innerHTML = RR_CONTROL_DEFS.map(rrControlHtml).join("");
+  if (scalars) scalars.innerHTML = RR_CONTROL_DEFS.map(rrControlHtml).join("");
 
   const playerBands = document.querySelector<HTMLDivElement>("#rrPlayerBands");
   if (playerBands) playerBands.innerHTML = rrBandTable(rrPlayerBands, "player");
@@ -325,465 +429,260 @@ function bindRrControls(): void {
   });
 }
 
+function calculateSavedPreset(preset: SavedLabPreset, evaluationDate: string): { name: string; method: string; ranking: Array<{playerId:string; playerName:string; rank:number; rating:number}> } | null {
+  try {
+    if (preset.method === "mcr") {
+      const payload = preset.payload ?? {};
+      const overrides: TableOverrides = {};
+      if (payload.useKtExperiment) overrides.ktParticipants = payload.ktExperiment;
+      if (payload.useVtExperiment) overrides.ageWeights = payload.vtExperiment;
+      const result = new Mcr2026Engine({ ...defaultMcr2026Config(), ...(payload.config ?? {}) }, overrides)
+        .calculate(players, results, evaluationDate);
+      return { name: preset.name, method: "MCR", ranking: result.ranking.map((x) => ({ playerId:x.playerId, playerName:x.playerName, rank:x.rank, rating:x.rating })) };
+    }
+    const payload = preset.payload ?? {};
+    const result = new RrEngine({ ...defaultRrConfig(), ...(payload.config ?? {}) }, {
+      playerBands: payload.playerBands ?? RR_DEFAULT_PLAYER_BANDS,
+      sessionBands: payload.sessionBands ?? RR_DEFAULT_SESSION_BANDS,
+      tournamentTypeMultipliers: payload.typeMultipliers ?? RR_DEFAULT_TYPE_MULTIPLIERS,
+      specialCoefficients: payload.specialCoefficients ?? RR_DEFAULT_SPECIAL_COEFFICIENTS,
+    }).calculate(players, results, evaluationDate);
+    return { name: preset.name, method: "RR", ranking: result.ranking.map((x) => ({ playerId:x.playerId, playerName:x.playerName, rank:x.rank, rating:x.rating })) };
+  } catch {
+    return null;
+  }
+}
+
+function diagnosticSummaryHtml(title: string, result: { diagnostics?: any[]; isComplete?: boolean; processedTournamentCount?: number; skippedTournamentCount?: number } | null, kind: "mcr" | "rr"): string {
+  if (!result) return `<div class="method-validation error"><strong>${esc(title)}</strong><span>Расчёт не выполнен.</span></div>`;
+  const diagnostics = result.diagnostics ?? [];
+  const groups = new Map<string, number>();
+  diagnostics.forEach((d: any) => groups.set(d.message, (groups.get(d.message) ?? 0) + 1));
+  const incomplete = result.isComplete === false;
+  const cls = incomplete ? "error" : diagnostics.length ? "warn" : "good";
+  const state = incomplete ? "⚠ Неполный расчёт" : diagnostics.length ? "⚠ Есть исключённые/адаптированные турниры" : "✓ Данные совместимы";
+  const rows = [...groups.entries()].slice(0, 6).map(([message, count]) => `<li>${esc(message)}${count > 1 ? ` × ${count}` : ""}</li>`).join("");
+  return `<div class="method-validation ${cls}"><div><strong>${esc(title)}</strong><span>${state}</span></div><div class="micro">Обработано турниров: ${result.processedTournamentCount ?? "—"}${result.skippedTournamentCount ? ` · пропущено: ${result.skippedTournamentCount}` : ""}</div>${rows ? `<ul>${rows}</ul>` : ""}${kind === "mcr" && incomplete ? `<div class="micro">Канонический MCR-2026 не интерполирует отсутствующие ЧУТ. В Лаборатории можно выбрать другой режим обработки и сохранить его как пользовательский preset.</div>` : ""}</div>`;
+}
+
 function renderComparison(): void {
-  const formula = document.querySelector<HTMLDivElement>("#rrFormulaMount");
-  if (formula) formula.innerHTML = renderRrMath(rrConfig);
-  renderRrControls();
   const host = document.querySelector<HTMLDivElement>("#comparisonRanking");
   const metrics = document.querySelector<HTMLDivElement>("#comparisonMetrics");
-  if (!host || !metrics || !current || !rrCurrent) return;
+  if (!host || !metrics) return;
 
-  const rrById = new Map(rrCurrent.ranking.map((row) => [row.playerId, row]));
-  const ids = new Set([...current.ranking.map((x) => x.playerId), ...rrCurrent.ranking.map((x) => x.playerId)]);
+  const presets = loadPresets();
+  const presetSelect = document.querySelector<HTMLSelectElement>("#comparisonPresetSelect");
+  if (presetSelect) {
+    const existing = comparisonPresetId;
+    presetSelect.innerHTML = `<option value="">Без пользовательского пресета</option>` + presets.map((p) =>
+      `<option value="${esc(p.id)}" ${p.id === existing ? "selected" : ""}>${esc(p.name)} · ${p.method.toUpperCase()}</option>`
+    ).join("");
+    presetSelect.onchange = () => { comparisonPresetId = presetSelect.value; renderComparison(); };
+  }
+
+  const evaluationDate = document.querySelector<HTMLInputElement>("#evaluationDate")?.value || evaluationDateState;
+  const selectedPreset = comparisonPresetId ? presets.find((p) => p.id === comparisonPresetId) : undefined;
+  const presetResult = selectedPreset ? calculateSavedPreset(selectedPreset, evaluationDate) : null;
+
+  const mcrById = new Map((reference?.ranking ?? []).map((x) => [x.playerId, x]));
+  const rrById = new Map((rrReference?.ranking ?? []).map((x) => [x.playerId, x]));
+  const presetById = new Map((presetResult?.ranking ?? []).map((x) => [x.playerId, x]));
+  const ids = new Set([...mcrById.keys(), ...rrById.keys(), ...presetById.keys()]);
   const rows = [...ids].map((playerId) => {
-    const m = current!.ranking.find((x) => x.playerId === playerId);
+    const m = mcrById.get(playerId);
     const r = rrById.get(playerId);
+    const p = presetById.get(playerId);
     return {
       playerId,
-      playerName: m?.playerName ?? r?.playerName ?? playerId,
+      playerName: m?.playerName ?? r?.playerName ?? p?.playerName ?? playerId,
       mcrRank: m?.rank ?? null,
       rrRank: r?.rank ?? null,
+      presetRank: p?.rank ?? null,
       mcrRating: m?.rating ?? null,
       rrRating: r?.rating ?? null,
-      rrP1: r?.firstPart ?? null,
-      rrP2: r?.secondPart ?? null,
+      presetRating: p?.rating ?? null,
       deltaRank: m && r ? m.rank - r.rank : null,
     };
-  }).sort((a, b) => (a.mcrRank ?? 1e9) - (b.mcrRank ?? 1e9));
+  }).sort((a,b)=>(a.mcrRank ?? 1e9)-(b.mcrRank ?? 1e9));
 
   const shared = rows.filter((x) => x.mcrRank !== null && x.rrRank !== null);
-  const meanAbs = shared.length ? shared.reduce((sum, x) => sum + Math.abs(x.deltaRank ?? 0), 0) / shared.length : 0;
-  metrics.innerHTML = `<div><span>Игроков MCR</span><strong>${current.ranking.length}</strong></div>
-    <div><span>Игроков RR</span><strong>${rrCurrent.ranking.length}</strong></div>
-    <div><span>Средний |Δ места|</span><strong>${fmt(meanAbs, 1)}</strong></div>`;
+  const meanAbs = shared.length ? shared.reduce((sum,x)=>sum+Math.abs(x.deltaRank ?? 0),0)/shared.length : 0;
+  metrics.innerHTML = `<div><span>MCR-2026 default</span><strong>${reference?.ranking.length ?? "—"}</strong></div>
+    <div><span>RR default</span><strong>${rrReference?.ranking.length ?? "—"}</strong></div>
+    <div><span>Средний |Δ места|</span><strong>${shared.length ? fmt(meanAbs,1) : "—"}</strong></div>
+    ${presetResult ? `<div><span>${esc(presetResult.name)}</span><strong>${presetResult.ranking.length}</strong></div>` : ""}`;
 
-  host.innerHTML = `<div class="table-wrap ranking-wrap"><table class="ranking-table comparison-table">
-    <thead><tr><th>Игрок</th><th>MCR #</th><th>RR #</th><th>Δ место RR−MCR</th><th>MCR Rating</th><th>RR</th><th>P1</th><th>P2</th><th>Турниров RR</th></tr></thead>
-    <tbody>${rows.map((x) => {
-      const rr = rrById.get(x.playerId);
-      const d = x.deltaRank;
+  const validationHtml = `<div class="method-validation-grid">
+    ${diagnosticSummaryHtml("MCR-2026 default", reference, "mcr")}
+    ${diagnosticSummaryHtml("RR default", rrReference, "rr")}
+  </div>`;
+
+  const presetHeaders = presetResult
+    ? `<th>${esc(presetResult.name)} #</th><th>Δ preset−MCR</th>` : "";
+  host.innerHTML = `${validationHtml}<div class="table-wrap ranking-wrap"><table class="ranking-table comparison-table">
+    <thead><tr><th>Игрок</th><th>MCR-2026 #</th><th>RR #</th><th>Δ RR−MCR</th>${presetHeaders}<th>MCR Rating</th><th>RR</th></tr></thead>
+    <tbody>${rows.map((x)=>{
+      const d=x.deltaRank;
+      const pd=x.mcrRank!==null && x.presetRank!==null ? x.mcrRank-x.presetRank : null;
       return `<tr><td>${esc(x.playerName)}</td><td>${x.mcrRank ?? "—"}</td><td>${x.rrRank ?? "—"}</td>
-        <td class="${d && d > 0 ? "pos" : d && d < 0 ? "neg" : ""}">${d === null ? "—" : `${d >= 0 ? "+" : ""}${d}`}</td>
-        <td>${x.mcrRating === null ? "—" : fmt(x.mcrRating)}</td><td>${x.rrRating === null ? "—" : fmt(x.rrRating)}</td>
-        <td>${x.rrP1 === null ? "—" : fmt(x.rrP1)}</td><td>${x.rrP2 === null ? "—" : fmt(x.rrP2)}</td><td>${rr?.tournamentsCount ?? "—"}</td></tr>`;
+        <td class="${d && d>0?"pos":d&&d<0?"neg":""}">${d===null?"—":`${d>=0?"+":""}${d}`}</td>
+        ${presetResult ? `<td>${x.presetRank ?? "—"}</td><td class="${pd && pd>0?"pos":pd&&pd<0?"neg":""}">${pd===null?"—":`${pd>=0?"+":""}${pd}`}</td>` : ""}
+        <td>${x.mcrRating===null?"—":fmt(x.mcrRating)}</td><td>${x.rrRating===null?"—":fmt(x.rrRating)}</td></tr>`;
     }).join("")}</tbody></table></div>`;
 }
 
 function renderShell(): void {
+  const presets = loadPresets().filter((p) => p.method === activeLabMethod);
+  const mcrControls = `
+    <details class="side-section" open><summary>Итоговый рейтинг</summary><div class="section-body">
+      ${controlHtml("euWeight","side")}${controlHtml("t5Weight","side")}${controlHtml("topN","side")}<div class="sum-note">Σ весов = 1.00</div>
+    </div></details>
+    <details class="side-section"><summary>Коэффициент турнира</summary><div class="section-body">
+      ${controlHtml("sessionCoef","side")}${controlHtml("playerCountScale","side")}${controlHtml("euComponentScale","side")}${controlHtml("euNormalizer","side")}${controlHtml("euRoundStep","side")}${controlHtml("statusTournamentBonus","side")}
+      <label class="select-row"><span>ЧУТ вне таблицы KT_ЧУТ</span><select id="participantCountPolicy">
+        <option value="strict" ${currentConfig.participantCountPolicy === "strict" ? "selected" : ""}>Strict — неполный расчёт</option>
+        <option value="lower" ${currentConfig.participantCountPolicy === "lower" ? "selected" : ""}>Ближайшее нижнее</option>
+        <option value="nearest" ${currentConfig.participantCountPolicy === "nearest" ? "selected" : ""}>Ближайшее значение</option>
+        <option value="interpolate" ${currentConfig.participantCountPolicy === "interpolate" ? "selected" : ""}>Линейная интерполяция</option>
+        <option value="skip" ${currentConfig.participantCountPolicy === "skip" ? "selected" : ""}>Исключить турнир</option>
+      </select></label>
+    </div></details>
+    <details class="side-section"><summary>Устаревание</summary><div class="section-body">${controlHtml("decayPerQuarter","side")}${controlHtml("maxAgeMonths","side")}</div></details>
+    <details class="side-section"><summary>EU / даны</summary><div class="section-body compact-stack">
+      <label class="select-row"><span>Double Strike</span><select id="doubleStrikeMode">
+        <option value="none" ${currentConfig.doubleStrikeMode === "none" ? "selected" : ""}>Нет</option>
+        <option value="A" ${currentConfig.doubleStrikeMode === "A" ? "selected" : ""}>A — полный пересчёт</option>
+        <option value="B" ${currentConfig.doubleStrikeMode === "B" ? "selected" : ""}>B — продолжение первой итерации</option>
+      </select></label>
+      <label class="select-row"><span>EU игрока замены</span><select id="substituteEuPolicy">
+        <option value="zero" ${currentConfig.substituteEuPolicy === "zero" ? "selected" : ""}>0</option>
+        <option value="average" ${currentConfig.substituteEuPolicy === "average" ? "selected" : ""}>Среднее арифметическое</option>
+        <option value="newcomer" ${currentConfig.substituteEuPolicy === "newcomer" ? "selected" : ""}>Считать новичком</option>
+      </select></label>
+      <label class="switch-row"><input type="checkbox" id="capKyuPromotionAtFirstDan" ${currentConfig.capKyuPromotionAtFirstDan ? "checked" : ""}><span>Из кю максимум до 1 дана за один турнир</span></label>
+      ${controlHtml("successesPerStep","side")}${controlHtml("failuresPerStep","side")}${controlHtml("danStep","side")}${controlHtml("confirmationMonths","side")}${controlHtml("protectedEu","side")}
+    </div></details>`;
+
+  const rrControls = `
+    <details class="side-section" open><summary>Итоговая формула и выбор турниров</summary><div class="section-body" id="rrScalarControls"></div></details>
+    <details class="side-section" open><summary>Количество игроков K<sub>N</sub></summary><div class="section-body" id="rrPlayerBands"></div></details>
+    <details class="side-section"><summary>Количество ханчанов K<sub>H</sub></summary><div class="section-body" id="rrSessionBands"></div></details>
+    <details class="side-section"><summary>Турниры с отсечением</summary><div class="section-body" id="rrSpecialCoefficients"></div></details>
+    <details class="side-section"><summary>Эксперимент: множитель типа турнира</summary><div class="section-body" id="rrTypeMultipliers"></div></details>`;
+
   app.innerHTML = `
     <div class="app">
-      <header class="topbar">
-        <div>
-          <h1>MCR Rating Lab</h1>
-          <div class="subtitle">v0.28 · TypeScript · MCR-2026 + RR · расчёт выполняется в браузере</div>
-        </div>
-        <div class="topbar-actions">
-          <div class="privacy-pill">CSV остаются на устройстве пользователя</div>
-          <div class="support-wrap">
-            <button id="supportButton" class="support-button" type="button">Donate / Support</button>
-            <div id="supportPopover" class="support-popover" hidden>
-              <strong>Поддержать проект</strong>
-              <span>Перевод по номеру телефона на Сбербанк</span>
-              <div class="support-number-row">
-                <code>+7 967 087 1525</code>
-                <button id="copySupportNumber" type="button">Копировать</button>
-              </div>
-              <span id="supportCopyStatus" class="micro"></span>
-            </div>
-          </div>
-        </div>
+      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.28.2 · TypeScript · MCR-2026 + RR · расчёт выполняется в браузере</div></div>
+        <div class="topbar-actions"><div class="privacy-pill">CSV остаются на устройстве пользователя</div>
+        <div class="support-wrap"><button id="supportButton" class="support-button" type="button">Donate / Support</button>
+        <div id="supportPopover" class="support-popover" hidden><strong>Поддержать проект</strong><span>Перевод по номеру телефона на Сбербанк</span><div class="support-number-row"><code>+7 967 087 1525</code><button id="copySupportNumber" type="button">Копировать</button></div><span id="supportCopyStatus" class="micro"></span></div></div></div>
       </header>
 
       <nav class="workspace-tabs" aria-label="Режим работы">
-        <button id="workspaceComparison" class="workspace-tab active" type="button">
-          Сравнение методик
-        </button>
-        <button id="workspaceHistory" class="workspace-tab" type="button">
-          История / симуляция
-        </button>
-        <button id="workspaceLab" class="workspace-tab" type="button">
-          Лаборатория
-        </button>
+        <button id="workspaceComparison" class="workspace-tab ${activeWorkspace === "comparison" ? "active" : ""}" type="button">Сравнение методик + история</button>
+        <button id="workspaceLab" class="workspace-tab ${activeWorkspace === "lab" ? "active" : ""}" type="button">Лаборатория</button>
       </nav>
 
-      <section id="comparisonWorkspace" class="workspace-panel active comparison-workspace">
-        <div class="layout">
-          <aside class="sidebar">
-            <section class="side-card">
-              <div class="side-title">RR — параметры</div>
-              <details class="side-section" open>
-                <summary>Итоговая формула</summary>
-                <div class="section-body" id="rrScalarControls"></div>
-              </details>
-              <details class="side-section" open>
-                <summary>Коэффициент по участникам</summary>
-                <div class="section-body" id="rrPlayerBands"></div>
-              </details>
-              <details class="side-section">
-                <summary>Коэффициент по турам</summary>
-                <div class="section-body" id="rrSessionBands"></div>
-              </details>
-              <details class="side-section">
-                <summary>Специальные коэффициенты</summary>
-                <div class="section-body" id="rrSpecialCoefficients"></div>
-              </details>
-              <details class="side-section">
-                <summary>Тип турнира — эксперимент</summary>
-                <div class="section-body" id="rrTypeMultipliers"></div>
-              </details>
-              <div class="sidebar-footer">
-                <button id="resetRrConfig" class="full">Сбросить RR к исходному коду</button>
-              </div>
-            </section>
-          </aside>
-          <main class="main">
-            <section class="formula-card">
-              <div class="eyebrow-row">
-                <div>
-                  <div class="eyebrow">RR</div>
-                  <div class="formula-caption">Порт алгоритма RatingRRCalculation из rr.py</div>
-                </div>
-                <div class="formula-badge">редактируемая формула</div>
-              </div>
-              <div id="rrFormulaMount" class="legacy-formula-mount">${renderRrMath(rrConfig)}</div>
-              <div class="formula-hint">
-                Коэффициенты слева изменяют формулу и пересчитывают тот же dataset, который используется MCR-2026.
-              </div>
-            </section>
-            <section class="results-card">
-              <div class="results-head">
-                <div>
-                  <h2>MCR-2026 ↔ RR</h2>
-                  <div class="reference-labels"><span>Один dataset</span><span>сравнение по месту, не по абсолютной шкале rating</span></div>
-                </div>
-                <div id="comparisonMetrics" class="metrics-strip"></div>
-              </div>
-              <div id="comparisonRanking"></div>
-            </section>
-            <section class="results-card comparison-next-card">
-              <div class="eyebrow">Следующий слой — v0.29</div>
-              <h2>Метрика дистанции Патрика</h2>
-              <div class="notice">Пары гистограмм «турниров до достижения / повторного достижения места» будут построены здесь поверх истории MCR и RR. В v0.28 подготовлены два движка и общий входной dataset.</div>
-            </section>
-          </main>
-        </div>
+      <section id="comparisonWorkspace" class="workspace-panel ${activeWorkspace === "comparison" ? "active" : ""} comparison-workspace">
+        <main class="main comparison-main">
+          <section class="results-card">
+            <div class="results-head"><div><div class="eyebrow">Сравнение методик</div><h2>MCR-2026 default ↔ RR default</h2>
+              <div class="reference-labels"><span>Один dataset</span><span>сравниваем позиции, а не абсолютные шкалы</span></div></div><div id="comparisonMetrics" class="metrics-strip"></div></div>
+            <div class="comparison-toolbar"><label>Пользовательский пресет <select id="comparisonPresetSelect"><option value="">Без пользовательского пресета</option></select></label></div>
+            <div id="comparisonRanking"></div>
+          </section>
+          <section class="results-card comparison-next-card"><div class="eyebrow">v0.29</div><h2>Метрика дистанции Патрика</h2><div class="notice">Пары гистограмм «турниров до достижения / повторного достижения места» будут добавлены сюда следующим патчем. Архитектура уже сравнивает один dataset через независимые движки и пользовательские пресеты.</div></section>
+
+          <section class="history-card history-embedded">
+            <div class="history-header"><div><div class="eyebrow">История / симуляция</div><div class="formula-caption">Шкала истории сохранена ниже сравнения методик.</div></div>
+              <label class="history-mode">Начальное состояние<select id="historyInitialMode"><option value="clean" ${historyInitialMode === "clean" ? "selected" : ""}>Чистый старт</option><option value="imported" ${historyInitialMode === "imported" ? "selected" : ""}>Игроки + импортированный EU</option></select></label></div>
+            <div id="historySummary" class="history-summary"></div><div class="timeline-control"><input id="historySlider" type="range" min="0" max="0" step="1" value="0"><div id="historyTicks" class="history-ticks"></div></div>
+          </section>
+          <section class="history-card"><div class="history-player-toolbar"><div><strong>Движение игрока</strong><span class="micro">MCR-конфигурация лаборатории против MCR-2026 default</span></div><select id="historyPlayerSelect"></select></div><div id="historyPlayerChart"></div></section>
+          <section id="historySnapshotPanel" class="history-card"></section>
+        </main>
       </section>
 
-      <div id="labWorkspace" class="workspace-panel">
-      <div class="layout">
-        <aside class="sidebar">
-          <section class="side-card">
-            <div class="side-title">Эксперимент</div>
-
-            <details class="side-section" open>
-              <summary>Данные</summary>
-              <div class="section-body compact-stack">
-                <div class="notice compact">Источник: <strong id="dataLabel"></strong></div>
-                <label class="file-row">players.csv <input id="playersFile" type="file" accept=".csv,text/csv"></label>
-                <label class="file-row">results.csv <input id="resultsFile" type="file" accept=".csv,text/csv"></label>
-                <div class="button-row">
-                  <button id="loadFiles" class="primary">Загрузить</button>
-                  <button id="loadBuiltin">Demo dataset</button>
-                </div>
-                <div id="status" class="micro"></div>
-              </div>
-            </details>
-
-            <details class="side-section" open>
-              <summary>Итоговый рейтинг</summary>
-              <div class="section-body">
-                ${controlHtml("euWeight", "side")}
-                ${controlHtml("t5Weight", "side")}
-                ${controlHtml("topN", "side")}
-                <div class="sum-note">Σ весов = 1.00</div>
-              </div>
-            </details>
-
-            <details class="side-section">
-              <summary>Коэффициент турнира</summary>
-              <div class="section-body">
-                ${controlHtml("sessionCoef", "side")}
-                ${controlHtml("playerCountScale", "side")}
-                ${controlHtml("euComponentScale", "side")}
-                ${controlHtml("euNormalizer", "side")}
-                ${controlHtml("euRoundStep", "side")}
-                ${controlHtml("statusTournamentBonus", "side")}
-              </div>
-            </details>
-
-            <details class="side-section">
-              <summary>Устаревание</summary>
-              <div class="section-body">
-                ${controlHtml("decayPerQuarter", "side")}
-                ${controlHtml("maxAgeMonths", "side")}
-              </div>
-            </details>
-
-            <details class="side-section">
-              <summary>EU / даны</summary>
-              <div class="section-body compact-stack">
-                <label class="select-row">
-                  <span>Double Strike</span>
-                  <select id="doubleStrikeMode">
-                    <option value="none" ${currentConfig.doubleStrikeMode === "none" ? "selected" : ""}>Нет</option>
-                    <option value="A" ${currentConfig.doubleStrikeMode === "A" ? "selected" : ""}>A — полный пересчёт</option>
-                    <option value="B" ${currentConfig.doubleStrikeMode === "B" ? "selected" : ""}>B — продолжение первой итерации</option>
-                  </select>
-                </label>
-                <div class="notice compact">
-                  <strong>A:</strong> первый проход нужен только для нового EU новичков; затем турнир пересчитывается с исходного состояния.
-                  <br><strong>B:</strong> второй проход продолжает первый и может добавить ещё один слой изменений.
-                </div>
-                <label class="select-row">
-                  <span>EU игрока замены</span>
-                  <select id="substituteEuPolicy">
-                    <option value="zero" ${currentConfig.substituteEuPolicy === "zero" ? "selected" : ""}>0</option>
-                    <option value="average" ${currentConfig.substituteEuPolicy === "average" ? "selected" : ""}>Среднее арифметическое</option>
-                    <option value="newcomer" ${currentConfig.substituteEuPolicy === "newcomer" ? "selected" : ""}>Считать новичком</option>
-                  </select>
-                </label>
-                <div class="micro">
-                  «Считать новичком» включает игрока замены в текущую политику Double Strike.
-                </div>
-                <label class="switch-row">
-                  <input type="checkbox" id="capKyuPromotionAtFirstDan" ${currentConfig.capKyuPromotionAtFirstDan ? "checked" : ""}>
-                  <span>Из кю максимум до 1 дана за один турнир</span>
-                </label>
-                <div class="micro">
-                  Если игрок начал турнир на кю, итог этого турнира не может поднять его выше 1 дана (EU 2000), включая Double Strike.
-                </div>
-                ${controlHtml("successesPerStep", "side")}
-                ${controlHtml("failuresPerStep", "side")}
-                ${controlHtml("danStep", "side")}
-                ${controlHtml("confirmationMonths", "side")}
-                ${controlHtml("protectedEu", "side")}
-              </div>
-            </details>
-
-            <div class="sidebar-footer">
-              <label class="date-row">Дата рейтинга
-                <input id="evaluationDate" type="date" value="${todayIso()}">
-              </label>
-              <button id="resetConfig" class="full">Сбросить MCR-2026 к default</button>
-            </div>
-          </section>
-        </aside>
+      <div id="labWorkspace" class="workspace-panel ${activeWorkspace === "lab" ? "active" : ""}"><div class="layout">
+        <aside class="sidebar"><section class="side-card">
+          <div class="side-title">Лаборатория методик</div>
+          <div class="section-body compact-stack method-picker">
+            <label class="select-row"><span>Методика</span><select id="labMethodSelect"><option value="mcr" ${activeLabMethod === "mcr" ? "selected" : ""}>MCR-2026</option><option value="rr" ${activeLabMethod === "rr" ? "selected" : ""}>RR</option></select></label>
+            <div class="preset-box"><label>Сохранённый пресет<select id="labPresetSelect"><option value="">— выбрать —</option>${presets.map((p)=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label>
+            <div class="preset-save-row"><input id="presetName" type="text" placeholder="Название пресета"><button id="savePreset" type="button">Сохранить</button><button id="deletePreset" type="button">Удалить</button></div></div>
+          </div>
+          <details class="side-section" open><summary>Данные</summary><div class="section-body compact-stack"><div class="notice compact">Источник: <strong id="dataLabel"></strong></div><label class="file-row">players.csv <input id="playersFile" type="file" accept=".csv,text/csv"></label><label class="file-row">results.csv <input id="resultsFile" type="file" accept=".csv,text/csv"></label><div class="button-row"><button id="loadFiles" class="primary">Загрузить</button><button id="loadBuiltin">Demo dataset</button></div><div id="status" class="micro"></div></div></details>
+          ${activeLabMethod === "mcr" ? mcrControls : rrControls}
+          <div class="sidebar-footer"><label class="date-row">Дата рейтинга<input id="evaluationDate" type="date" value="${evaluationDateState}"></label><button id="resetMethodConfig" class="full">Сбросить ${activeLabMethod === "mcr" ? "MCR-2026" : "RR"} к default</button></div>
+        </section></aside>
 
         <main class="main">
-          <section class="formula-card">
-            <div class="eyebrow-row">
-              <div>
-                <div class="eyebrow">MCR-2026</div>
-                <div class="formula-caption">Основная формула и её компоненты</div>
-              </div>
-              <div class="formula-badge">интерактивная формула</div>
-            </div>
-
-            <div id="legacyFormulaMount" class="legacy-formula-mount">
-              ${renderMcr2026Math(currentConfig)}
-            </div>
-
-            <div class="formula-hint">
-              Нажмите на коэффициент или обозначение в формуле — пояснение и связанные настройки откроются ниже.
-            </div>
-            <div id="formulaInspector" class="formula-inspector"></div>
+          <section class="formula-card"><div class="eyebrow-row"><div><div class="eyebrow">${activeLabMethod === "mcr" ? "MCR-2026" : "RR"}</div><div class="formula-caption">${activeLabMethod === "mcr" ? "Основная формула и её компоненты" : "Внутренний российский рейтинг: две части A и B"}</div></div><div class="formula-badge">интерактивная формула</div></div>
+            <div id="legacyFormulaMount" class="legacy-formula-mount">${activeLabMethod === "mcr" ? renderMcr2026Math(currentConfig) : renderRrMath(rrConfig)}</div>
+            <div class="formula-hint">Нажмите на коэффициент или обозначение — ниже появятся пояснение и связанные редактируемые параметры.</div><div id="formulaInspector" class="formula-inspector"></div>
           </section>
-
-          <details class="reference-card">
-            <summary>
-              <span>Справочники MCR-2026 — посмотреть и поиграть</span>
-              <span class="summary-note">канон + экспериментальные копии</span>
-            </summary>
-            <div class="reference-body">
-              <div class="tabs" id="tabs"></div>
-              <div id="referencePanel"></div>
-            </div>
-          </details>
-
-          <section class="results-card">
-            <div class="results-head">
-              <div>
-                <h2>Рейтинговая таблица</h2>
-                <div class="reference-labels">
-                  <span>Текущая: <strong>MCR-2026</strong></span>
-                  <span>Эталон: <strong>MCR-2026 default</strong></span>
-                </div>
-              </div>
-              <div id="metrics" class="metrics-strip"></div>
-            </div>
-
-            <div class="ranking-toolbar">
-              <label class="ranking-search">
-                <span>Поиск</span>
-                <input id="rankingSearch" type="search" placeholder="Игрок, ID, уровень…" value="${esc(rankingSearch)}">
-              </label>
-              <div class="ranking-toolbar-actions">
-                <span id="rankingVisibleCount" class="micro"></span>
-                <button id="exportRankingCsv" class="download-button" type="button">↓ CSV</button>
-              </div>
-            </div>
-
-            <div id="deltaLeaders" class="delta-leaders"></div>
-            <div id="ranking"></div>
+          ${activeLabMethod === "mcr" ? `<details class="reference-card"><summary><span>Справочники MCR-2026 — посмотреть и поиграть</span><span class="summary-note">канон + экспериментальные копии</span></summary><div class="reference-body"><div class="tabs" id="tabs"></div><div id="referencePanel"></div></div></details>` : `<details class="reference-card"><summary><span>RR — правила и допуски</span><span class="summary-note">исходная методика</span></summary><div class="reference-body rr-about"><p><strong>Окно:</strong> последние два года. В рейтинге отображаются игроки минимум с двумя неустаревшими турнирами.</p><p><strong>С 2018 года:</strong> в исходной системе учитываются аккредитованные открытые турниры от 16 игроков и от 4 ханчанов; клубные зарубежные турниры не учитываются. Browser-lab предполагает, что загруженный CSV уже отфильтрован по аккредитации/открытости, потому что этих полей в текущей схеме CSV нет.</p><p><strong>Игроки замены:</strong> входят в число участников N при расчёте базового ранга и коэффициента турнира, но сами не отображаются в RR.</p></div></details>`}
+          <section class="results-card"><div class="results-head"><div><h2>Рейтинговая таблица</h2><div class="reference-labels"><span>Текущая: <strong>${activeLabMethod === "mcr" ? "MCR-2026 / пользовательская конфигурация" : "RR / пользовательская конфигурация"}</strong></span><span>Эталон: <strong>${activeLabMethod === "mcr" ? "MCR-2026 default" : "RR default"}</strong></span></div></div><div id="metrics" class="metrics-strip"></div></div>
+            <div class="ranking-toolbar"><label class="ranking-search"><span>Поиск</span><input id="rankingSearch" type="search" placeholder="Игрок, ID…" value="${esc(rankingSearch)}"></label><div class="ranking-toolbar-actions"><span id="rankingVisibleCount" class="micro"></span><button id="exportRankingCsv" class="download-button" type="button">↓ CSV</button></div></div><div id="deltaLeaders" class="delta-leaders"></div><div id="ranking"></div>
           </section>
         </main>
-      </div>
-      </div>
-
-      <section id="historyWorkspace" class="workspace-panel history-workspace">
-        <section class="history-card">
-          <div class="history-header">
-            <div>
-              <div class="eyebrow">Последовательная симуляция</div>
-              <div class="formula-caption">
-                Каждый шаг — состояние рейтинга непосредственно после очередного турнира.
-              </div>
-            </div>
-            <label class="history-mode">
-              Начальное состояние
-              <select id="historyInitialMode">
-                <option value="clean" ${historyInitialMode === "clean" ? "selected" : ""}>
-                  Чистый старт
-                </option>
-                <option value="imported" ${historyInitialMode === "imported" ? "selected" : ""}>
-                  Игроки + импортированный EU
-                </option>
-              </select>
-            </label>
-          </div>
-
-          <div id="historySummary" class="history-summary"></div>
-
-          <div class="timeline-control">
-            <input id="historySlider" type="range" min="0" max="0" step="1" value="0">
-            <div id="historyTicks" class="history-ticks"></div>
-          </div>
-        </section>
-
-        <section class="history-card">
-          <div class="history-player-toolbar">
-            <div>
-              <strong>Движение игрока</strong>
-              <span class="micro">экспериментальная MCR-2026 против MCR-2026 default</span>
-            </div>
-            <select id="historyPlayerSelect"></select>
-          </div>
-          <div id="historyPlayerChart"></div>
-        </section>
-
-        <section id="historySnapshotPanel" class="history-card"></section>
-      </section>
+      </div></div>
     </div>`;
 
-  byId("dataLabel").textContent = dataLabel;
-
+  const dataLabelEl = document.getElementById("dataLabel"); if (dataLabelEl) dataLabelEl.textContent = dataLabel;
   bindNumericControls();
+  renderRrControls();
   bindFormulaTokens();
-
-  byId<HTMLInputElement>("evaluationDate").addEventListener("change", recalc);
-  byId<HTMLSelectElement>("doubleStrikeMode").addEventListener("change", (e) => {
-    currentConfig.doubleStrikeMode = (e.currentTarget as HTMLSelectElement).value as Mcr2026Config["doubleStrikeMode"];
-    recalc();
-    if (activeFormulaToken === "DoubleStrike") renderFormulaInspector();
-  });
-  byId<HTMLSelectElement>("substituteEuPolicy").addEventListener("change", (e) => {
-    currentConfig.substituteEuPolicy = (e.currentTarget as HTMLSelectElement).value as Mcr2026Config["substituteEuPolicy"];
-    recalc();
-  });
-  byId<HTMLInputElement>("capKyuPromotionAtFirstDan").addEventListener("change", (e) => {
-    currentConfig.capKyuPromotionAtFirstDan = (e.currentTarget as HTMLInputElement).checked;
-    recalc();
-  });
-
-  byId("resetConfig").addEventListener("click", () => {
-    currentConfig = defaultMcr2026Config();
-    useKtExperiment = false;
-    useVtExperiment = false;
-    ktExperiment = { ...KT_PARTICIPANTS };
-    vtExperiment = MCR2026_AGE_WEIGHTS.map((x) => ({ ...x }));
-    activeFormulaToken = null;
-    renderShell();
-    setupTabs();
-    recalc();
-  });
-
-  byId("loadFiles").addEventListener("click", loadFiles);
-  byId("loadBuiltin").addEventListener("click", loadBuiltin);
-
-  byId<HTMLInputElement>("rankingSearch").addEventListener("input", (e) => {
-    rankingSearch = (e.currentTarget as HTMLInputElement).value;
-    renderOutput();
-  });
-
-  byId("exportRankingCsv").addEventListener("click", exportRankingCsv);
-
-  byId("workspaceComparison").addEventListener("click", () => setWorkspace("comparison"));
-  byId("workspaceLab").addEventListener("click", () => setWorkspace("lab"));
-  byId("workspaceHistory").addEventListener("click", () => setWorkspace("history"));
-  bindRrControls();
-  byId("resetRrConfig").addEventListener("click", () => {
-    rrConfig = defaultRrConfig();
-    rrPlayerBands = RR_DEFAULT_PLAYER_BANDS.map((x) => ({ ...x }));
-    rrSessionBands = RR_DEFAULT_SESSION_BANDS.map((x) => ({ ...x }));
-    rrTypeMultipliers = { ...RR_DEFAULT_TYPE_MULTIPLIERS };
-    rrSpecialCoefficients = RR_DEFAULT_SPECIAL_COEFFICIENTS.map((x) => ({ ...x }));
-    renderRrControls();
-    recalc();
-  });
-
-  byId("supportButton").addEventListener("click", () => {
-    const popover = byId<HTMLDivElement>("supportPopover");
-    popover.hidden = !popover.hidden;
-  });
-
-  byId("copySupportNumber").addEventListener("click", async () => {
-    const value = "+7 967 087 1525";
-    try {
-      await navigator.clipboard.writeText(value);
-      byId("supportCopyStatus").textContent = "Номер скопирован";
-    } catch {
-      byId("supportCopyStatus").textContent = value;
-    }
-  });
-
-  byId<HTMLSelectElement>("historyInitialMode").addEventListener("change", (e) => {
-    historyInitialMode = (e.currentTarget as HTMLSelectElement).value as InitialStateMode;
-    historyDirty = true;
-    historySnapshotIndex = 0;
-    renderHistoryWorkspace();
-  });
-
-  byId<HTMLInputElement>("historySlider").addEventListener("input", (e) => {
-    historySnapshotIndex = Number((e.currentTarget as HTMLInputElement).value);
-    historyExpandedPlayerId = null;
-    renderHistorySnapshot();
-  });
-
-  byId<HTMLSelectElement>("historyPlayerSelect").addEventListener("change", (e) => {
-    historyPlayerId = (e.currentTarget as HTMLSelectElement).value || null;
-    renderHistoryPlayerChart();
-  });
-
   setupTabs();
   renderFormulaInspector();
+
+  document.getElementById("workspaceComparison")?.addEventListener("click", () => setWorkspace("comparison"));
+  document.getElementById("workspaceLab")?.addEventListener("click", () => setWorkspace("lab"));
+  document.getElementById("labMethodSelect")?.addEventListener("change", (e) => { activeLabMethod = (e.currentTarget as HTMLSelectElement).value as "mcr"|"rr"; activeFormulaToken=null; activeRrFormulaToken=null; renderShell(); recalc(); });
+  document.getElementById("evaluationDate")?.addEventListener("change", (e)=>{ evaluationDateState=(e.currentTarget as HTMLInputElement).value; recalc(); });
+  document.getElementById("loadFiles")?.addEventListener("click", loadFiles);
+  document.getElementById("loadBuiltin")?.addEventListener("click", loadBuiltin);
+  document.getElementById("rankingSearch")?.addEventListener("input", (e) => { rankingSearch=(e.currentTarget as HTMLInputElement).value; renderOutput(); });
+  document.getElementById("exportRankingCsv")?.addEventListener("click", () => activeLabMethod === "rr" ? exportRrRankingCsv() : exportRankingCsv());
+
+  document.getElementById("doubleStrikeMode")?.addEventListener("change", (e)=>{ currentConfig.doubleStrikeMode=(e.currentTarget as HTMLSelectElement).value as Mcr2026Config["doubleStrikeMode"]; recalc(); });
+  document.getElementById("substituteEuPolicy")?.addEventListener("change", (e)=>{ currentConfig.substituteEuPolicy=(e.currentTarget as HTMLSelectElement).value as Mcr2026Config["substituteEuPolicy"]; recalc(); });
+  document.getElementById("capKyuPromotionAtFirstDan")?.addEventListener("change", (e)=>{ currentConfig.capKyuPromotionAtFirstDan=(e.currentTarget as HTMLInputElement).checked; recalc(); });
+  document.getElementById("participantCountPolicy")?.addEventListener("change", (e)=>{ currentConfig.participantCountPolicy=(e.currentTarget as HTMLSelectElement).value as Mcr2026Config["participantCountPolicy"]; recalc(); });
+
+  document.getElementById("resetMethodConfig")?.addEventListener("click", ()=>{
+    if (activeLabMethod === "mcr") { currentConfig=defaultMcr2026Config(); useKtExperiment=false; useVtExperiment=false; ktExperiment={...KT_PARTICIPANTS}; vtExperiment=MCR2026_AGE_WEIGHTS.map((x)=>({...x})); }
+    else { rrConfig=defaultRrConfig(); rrPlayerBands=RR_DEFAULT_PLAYER_BANDS.map((x)=>({...x})); rrSessionBands=RR_DEFAULT_SESSION_BANDS.map((x)=>({...x})); rrTypeMultipliers={...RR_DEFAULT_TYPE_MULTIPLIERS}; rrSpecialCoefficients=RR_DEFAULT_SPECIAL_COEFFICIENTS.map((x)=>({...x})); }
+    activeFormulaToken=null; activeRrFormulaToken=null; renderShell(); recalc();
+  });
+
+  document.getElementById("savePreset")?.addEventListener("click", ()=>{
+    const name=(document.getElementById("presetName") as HTMLInputElement)?.value.trim(); if(!name) return;
+    const items=loadPresets(); const p=captureCurrentPreset(name); items.push(p); storePresets(items); comparisonPresetId=p.id; renderShell(); recalc();
+  });
+  document.getElementById("labPresetSelect")?.addEventListener("change", (e)=>{ const id=(e.currentTarget as HTMLSelectElement).value; const p=loadPresets().find((x)=>x.id===id); if(p){ applyPreset(p); comparisonPresetId=p.id; renderShell(); recalc(); } });
+  document.getElementById("deletePreset")?.addEventListener("click", ()=>{ const sel=document.getElementById("labPresetSelect") as HTMLSelectElement; const id=sel?.value; if(!id)return; storePresets(loadPresets().filter((x)=>x.id!==id)); if(comparisonPresetId===id)comparisonPresetId=""; renderShell(); recalc(); });
+
+  const support=document.getElementById("supportButton"); support?.addEventListener("click",()=>{ const pop=document.getElementById("supportPopover") as HTMLDivElement; pop.hidden=!pop.hidden; });
+  document.getElementById("copySupportNumber")?.addEventListener("click", async()=>{ const value="+7 967 087 1525"; try{await navigator.clipboard.writeText(value); const x=document.getElementById("supportCopyStatus"); if(x)x.textContent="Номер скопирован";}catch{const x=document.getElementById("supportCopyStatus"); if(x)x.textContent=value;} });
+
+  document.getElementById("historyInitialMode")?.addEventListener("change",(e)=>{historyInitialMode=(e.currentTarget as HTMLSelectElement).value as InitialStateMode;historyDirty=true;historySnapshotIndex=0;renderHistoryWorkspace();});
+  document.getElementById("historySlider")?.addEventListener("input",(e)=>{historySnapshotIndex=Number((e.currentTarget as HTMLInputElement).value);historyExpandedPlayerId=null;renderHistorySnapshot();});
+  document.getElementById("historyPlayerSelect")?.addEventListener("change",(e)=>{historyPlayerId=(e.currentTarget as HTMLSelectElement).value||null;renderHistoryPlayerChart();});
 }
 
 function bindFormulaTokens(): void {
   document.querySelectorAll<HTMLElement>("[data-formula-token]").forEach((element) => {
     element.addEventListener("click", () => {
       const token = element.dataset.formulaToken!;
-      activeFormulaToken = activeFormulaToken === token ? null : token;
-
-      document
-        .querySelectorAll<HTMLElement>("[data-formula-token]")
-        .forEach((el) => el.classList.remove("selected"));
-
-      if (activeFormulaToken) {
-        document
-          .querySelectorAll<HTMLElement>(`[data-formula-token="${activeFormulaToken}"]`)
-          .forEach((el) => el.classList.add("selected"));
+      if (activeLabMethod === "rr") {
+        activeRrFormulaToken = activeRrFormulaToken === token ? null : token;
+      } else {
+        activeFormulaToken = activeFormulaToken === token ? null : token;
       }
-
+      document.querySelectorAll<HTMLElement>("[data-formula-token]").forEach((el)=>el.classList.remove("selected"));
+      const active = activeLabMethod === "rr" ? activeRrFormulaToken : activeFormulaToken;
+      if (active) document.querySelectorAll<HTMLElement>(`[data-formula-token="${active}"]`).forEach((el)=>el.classList.add("selected"));
       renderFormulaInspector();
     });
   });
@@ -792,15 +691,10 @@ function bindFormulaTokens(): void {
 function renderFormulaMath(): void {
   const mount = document.querySelector<HTMLDivElement>("#legacyFormulaMount");
   if (!mount) return;
-
-  mount.innerHTML = renderMcr2026Math(currentConfig);
+  mount.innerHTML = activeLabMethod === "rr" ? renderRrMath(rrConfig) : renderMcr2026Math(currentConfig);
   bindFormulaTokens();
-
-  if (activeFormulaToken) {
-    mount
-      .querySelectorAll<HTMLElement>(`[data-formula-token="${activeFormulaToken}"]`)
-      .forEach((el) => el.classList.add("selected"));
-  }
+  const active = activeLabMethod === "rr" ? activeRrFormulaToken : activeFormulaToken;
+  if (active) mount.querySelectorAll<HTMLElement>(`[data-formula-token="${active}"]`).forEach((el)=>el.classList.add("selected"));
 }
 
 const TOKEN_HELP: Record<string, { title: string; text: string; controls?: (keyof typeof CONTROL_DEFS)[]; action?: string }> = {
@@ -914,9 +808,51 @@ const TOKEN_HELP: Record<string, { title: string; text: string; controls?: (keyo
   },
 };
 
+const RR_TOKEN_HELP: Record<string, { title:string; text:string; controls?:RrNumericKey[]; table?:"players"|"sessions"|"special"|"types" }> = {
+  rrW1: { title:"Вес первой части A", text:"Доля первой части в итоговом RR. В исходной методике A и B имеют веса 0.5/0.5; второй вес автоматически дополняет первый до 1.", controls:["firstPartWeight"] },
+  rrW2: { title:"Вес второй части B", text:"Доля четырёх лучших турниров в итоговом RR. В исходной методике равна 0.5.", controls:["secondPartWeight"] },
+  rrP1: { title:"A — первая часть RR", text:"Взвешенное среднее турнирных результатов. Если сыграно меньше пяти турниров, недостающие позиции добавляют 0 в числитель и единицу в знаменатель. При более чем пяти турнирах берутся 5 + 80% оставшихся лучших результатов.", controls:["firstPartBaseTournaments","firstPartAdditionalShare","firstPartMissingDenominator"] },
+  rrP2: { title:"B — вторая часть RR", text:"Сумма лучших турнирных вкладов игрока делится на сумму максимальных доступных коэффициентов турниров за окно рейтинга. В исходной методике используются четыре лучших турнира.", controls:["secondPartBestTournaments"] },
+  rrBR: { title:"R — базовый ранг", text:"Турнирный результат игрока от 0 до 1000: первое место даёт максимум, последнее — 0. В N входят и игроки замены.", controls:["baseRankScale"] },
+  rrScale: { title:"Шкала базового ранга", text:"В исходном RR верхняя граница базового ранга равна 1000. Изменение масштабирует вклад места во всех турнирах.", controls:["baseRankScale"] },
+  rrN: { title:"N — количество игроков", text:"Общее число участников турнира, включая игроков замены. Используется одновременно в базовом ранге R и коэффициенте K_N.", controls:["playersPerUnit","playersCoefficientCap"], table:"players" },
+  rrPlace: { title:"p — место игрока", text:"Итоговое место в турнире. R = 1000·(N−p)/(N−1)." },
+  rrDelta: { title:"Турнирный вклад D", text:"Произведение базового ранга R, веса турнира W и коэффициента устаревания A. Именно эти значения участвуют в выборе лучших результатов." },
+  rrW: { title:"W — коэффициент турнира", text:"Для обычного турнира W = K_N + K_H. Для турниров с отсечением историческая реализация может задавать player-specific W в зависимости от достигнутого этапа.", table:"special" },
+  rrKN: { title:"K_N — вклад количества игроков", text:"За первые 60 игроков добавляется 0.10 за каждую четвёрку, с 61 по 120 — 0.05, с 121 по 180 — 0.01; после 180 коэффициент фиксируется. Диапазоны и ставки можно редактировать.", controls:["playersPerUnit","playersCoefficientCap"], table:"players" },
+  rrKS: { title:"K_H — вклад количества ханчанов", text:"Первые 8 ханчанов дают по 0.20, 9–12 — по 0.15, 13–16 — по 0.10, 17–20 — по 0.05; после 20 коэффициент фиксируется на 2.8. Диапазоны редактируются.", controls:["sessionsCoefficientCap"], table:"sessions" },
+  rrCut: { title:"W для турнира с отсечением", text:"Для турниров с несколькими этапами W может зависеть от игрока: K_N плюс среднее между коэффициентом ханчанов, сыгранных этим игроком, и средневзвешенным K_H турнира. В текущей CSV-схеме нет этапов, поэтому исторические значения из hardcoded_coefficients используются как player-specific W.", table:"special" },
+  rrAge: { title:"A — угасание результата", text:"Турниры младше 12 месяцев учитываются полностью. Затем вес уменьшается на 1/7 каждые два месяца и становится нулевым после двух лет.", controls:["ratingWindowDays","ageFullMonths","ageZeroMonths","ageStepMonths","ageStepDrop"] },
+  rrM: { title:"m(T) — сколько турниров входит в A", text:"До базового порога учитываются все турниры. Далее добавляется заданная доля дополнительных турниров с округлением вверх.", controls:["firstPartBaseTournaments","firstPartAdditionalShare"] },
+  rrBaseCount: { title:"Базовое число турниров", text:"Исходный RR использует 5 турниров как базу первой части.", controls:["firstPartBaseTournaments"] },
+  rrShare: { title:"Доля дополнительных турниров", text:"Из турниров сверх базовых в первую часть попадает 80% лучших, с округлением вверх.", controls:["firstPartAdditionalShare"] },
+  rrWeightedK: { title:"W·A в знаменателе A", text:"Первая часть нормируется на сумму весов выбранных турниров с учётом устаревания." },
+  rrFill: { title:"Заполнитель недостающего турнира", text:"Если сыграно меньше базовых пяти турниров, каждый недостающий турнир даёт 0 в числитель и это значение в знаменатель. В исходной формуле F=1.", controls:["firstPartMissingDenominator"] },
+  rrBestCount: { title:"Число лучших турниров B", text:"Количество лучших по R·W·A турниров во второй части. Исходное значение — 4.", controls:["secondPartBestTournaments"] },
+  rrMaxCoef: { title:"MAXK — эталонные максимальные коэффициенты", text:"Для всех игроков знаменатель B одинаков: сумма нескольких максимальных W·A среди турниров в двухлетнем окне. Для турниров с отсечением учитываются их специальные коэффициенты.", controls:["secondPartBestTournaments"], table:"special" },
+};
+
+function rrInspectorTable(kind: "players"|"sessions"|"special"|"types"): string {
+  if (kind === "players") return `<div class="inspector-table"><strong>Диапазоны K_N</strong>${rrBandTable(rrPlayerBands,"player")}</div>`;
+  if (kind === "sessions") return `<div class="inspector-table"><strong>Диапазоны K_H</strong>${rrBandTable(rrSessionBands,"session")}</div>`;
+  if (kind === "special") return `<div class="inspector-table"><strong>Турниры с отсечением / исторические W</strong><div class="table-wrap compact-table"><table class="editor-table"><thead><tr><th>Турнир ID</th><th>Игрок ID</th><th>W</th></tr></thead><tbody>${rrSpecialCoefficients.map((row,i)=>`<tr><td><input data-rr-special-tournament="${i}" value="${esc(row.tournamentId)}"></td><td><input data-rr-special-player="${i}" value="${esc(row.playerId)}"></td><td><input data-rr-special-coef="${i}" type="number" step="0.01" value="${row.coefficient.toFixed(2)}"></td></tr>`).join("")}</tbody></table></div></div>`;
+  return `<div class="inspector-table"><strong>Экспериментальный множитель типа турнира</strong><div class="table-wrap compact-table"><table class="editor-table"><tbody>${Object.entries(rrTypeMultipliers).map(([k,v])=>`<tr><td>${esc(k)}</td><td><input data-rr-type="${esc(k)}" type="number" step="0.05" value="${v.toFixed(2)}"></td></tr>`).join("")}</tbody></table></div></div>`;
+}
+
 function renderFormulaInspector(): void {
   const panel = document.querySelector<HTMLDivElement>("#formulaInspector");
   if (!panel) return;
+
+  if (activeLabMethod === "rr") {
+    if (!activeRrFormulaToken) { panel.innerHTML=""; panel.classList.remove("open"); return; }
+    const item = RR_TOKEN_HELP[activeRrFormulaToken];
+    if (!item) { panel.innerHTML=""; panel.classList.remove("open"); return; }
+    const controls = (item.controls ?? []).map((key)=>rrControlHtml(rrDef(key))).join("");
+    panel.innerHTML = `<div class="inspector-copy"><strong>${esc(item.title)}</strong><span>${esc(item.text)}</span></div>${controls?`<div class="inspector-controls">${controls}</div>`:""}${item.table?rrInspectorTable(item.table):""}`;
+    panel.classList.add("open");
+    bindRrControls();
+    return;
+  }
 
   if (!activeFormulaToken) {
     panel.innerHTML = "";
@@ -1318,8 +1254,38 @@ function bindRankingInteractions(): void {
   });
 }
 
+function renderRrLabOutput(): void {
+  if (!rrCurrent || !rrReference) {
+    const ranking=document.querySelector<HTMLElement>("#ranking"); if(ranking) ranking.innerHTML=`<div class="notice error">RR не удалось рассчитать для текущего набора/конфигурации.</div>`; return;
+  }
+  const metrics=document.querySelector<HTMLElement>("#metrics");
+  const leaders=document.querySelector<HTMLElement>("#deltaLeaders");
+  const ranking=document.querySelector<HTMLElement>("#ranking");
+  if(!metrics||!leaders||!ranking)return;
+  const ref=new Map(rrReference.ranking.map((x)=>[x.playerId,x]));
+  let rows=rrCurrent.ranking.map((x)=>{const r=ref.get(x.playerId);return {...x,refRank:r?.rank??null,refRating:r?.rating??null,deltaRank:r? r.rank-x.rank:null,deltaRating:r?x.rating-r.rating:null};});
+  const q=rankingSearch.trim().toLocaleLowerCase("ru"); if(q)rows=rows.filter((x)=>[x.playerName,x.playerId].some((v)=>String(v).toLocaleLowerCase("ru").includes(q)));
+  const changed=rows.filter((x)=>x.deltaRank!==null&&x.deltaRank!==0).length;
+  const mean=rows.length?rows.reduce((a,x)=>a+Math.abs(x.deltaRank??0),0)/rows.length:0;
+  metrics.innerHTML=`<div class="metric-chip"><span>Игроков</span><strong>${rrCurrent.ranking.length}</strong></div><div class="metric-chip"><span>Изменили место</span><strong>${changed}</strong></div><div class="metric-chip"><span>Среднее |Δ места|</span><strong>${fmt(mean,1)}</strong></div>`;
+  leaders.innerHTML = (rrCurrent.diagnostics?.length ?? 0)
+    ? diagnosticSummaryHtml("RR / текущая конфигурация", rrCurrent, "rr")
+    : "";
+  const count=document.getElementById("rankingVisibleCount"); if(count)count.textContent=`${rows.length} игроков`;
+  ranking.innerHTML=`<div class="table-wrap ranking-wrap"><table class="ranking-table"><thead><tr><th>#</th><th>Игрок</th><th>RR</th><th>A</th><th>B</th><th>Турниров</th><th>RR default</th><th>Δ RR</th><th>Δ место</th></tr></thead><tbody>${rows.map((x)=>`<tr><td>${x.rank}</td><td>${esc(x.playerName)}</td><td class="emph">${fmt(x.rating)}</td><td>${fmt(x.firstPart)}</td><td>${fmt(x.secondPart)}</td><td>${x.tournamentsCount}</td><td>${x.refRating===null?"—":fmt(x.refRating)}</td><td>${x.deltaRating===null?"—":`${x.deltaRating>=0?"+":""}${fmt(x.deltaRating)}`}</td><td>${x.deltaRank===null?"—":`${x.deltaRank>=0?"+":""}${x.deltaRank}`}</td></tr>`).join("")}</tbody></table></div>`;
+}
+
+function exportRrRankingCsv(): void {
+  if(!rrCurrent)return;
+  const lines=["rank,player_id,player_name,rr,A,B,tournaments",...rrCurrent.ranking.map((x)=>[x.rank,x.playerId,`"${String(x.playerName).replaceAll('"','""')}"`,x.rating,x.firstPart,x.secondPart,x.tournamentsCount].join(","))];
+  const blob=new Blob(["\\uFEFF"+lines.join("\\n")],{type:"text/csv;charset=utf-8"}); const url=URL.createObjectURL(blob); const a=document.createElement("a");a.href=url;a.download="rr_ranking.csv";a.click();URL.revokeObjectURL(url);
+}
+
 function renderOutput(): void {
-  if (!current || !reference) return;
+  if (activeLabMethod === "rr") { renderRrLabOutput(); return; }
+  if (!current || !reference) {
+    const ranking=document.querySelector<HTMLElement>("#ranking"); if(ranking) ranking.innerHTML=`<div class="notice error">MCR не удалось рассчитать для текущего набора/конфигурации.</div>`; return;
+  }
 
   syncAllControlValues();
 
@@ -1353,7 +1319,8 @@ function renderOutput(): void {
 
   const deltaLeaders = document.querySelector<HTMLDivElement>("#deltaLeaders")!;
   deltaLeaders.innerHTML =
-    deltaMiniTable("Наибольший рост", positive, "positive")
+    ((current.diagnostics?.length ?? 0) ? diagnosticSummaryHtml("MCR / текущая конфигурация", current, "mcr") : "")
+    + deltaMiniTable("Наибольший рост", positive, "positive")
     + deltaMiniTable("Наибольшее падение", negative, "negative");
 
   const query = rankingSearch.trim().toLocaleLowerCase("ru");
@@ -1431,24 +1398,13 @@ function renderOutput(): void {
 }
 
 
-function setWorkspace(workspace: "comparison" | "lab" | "history"): void {
+function setWorkspace(workspace: "comparison" | "lab"): void {
   activeWorkspace = workspace;
-  const comparison = byId("comparisonWorkspace");
-  const lab = byId("labWorkspace");
-  const history = byId("historyWorkspace");
-  const comparisonButton = byId("workspaceComparison");
-  const labButton = byId("workspaceLab");
-  const historyButton = byId("workspaceHistory");
-
-  comparison.classList.toggle("active", workspace === "comparison");
-  lab.classList.toggle("active", workspace === "lab");
-  history.classList.toggle("active", workspace === "history");
-  comparisonButton.classList.toggle("active", workspace === "comparison");
-  labButton.classList.toggle("active", workspace === "lab");
-  historyButton.classList.toggle("active", workspace === "history");
-
-  if (workspace === "comparison") renderComparison();
-  if (workspace === "history") renderHistoryWorkspace();
+  document.getElementById("comparisonWorkspace")?.classList.toggle("active", workspace === "comparison");
+  document.getElementById("labWorkspace")?.classList.toggle("active", workspace === "lab");
+  document.getElementById("workspaceComparison")?.classList.toggle("active", workspace === "comparison");
+  document.getElementById("workspaceLab")?.classList.toggle("active", workspace === "lab");
+  if (workspace === "comparison") { renderComparison(); renderHistoryWorkspace(); }
 }
 
 function historyOverrides(): TableOverrides {

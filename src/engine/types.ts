@@ -43,6 +43,7 @@ export interface EvolutionState {
 
 export type DoubleStrikeMode = "none" | "A" | "B";
 export type SubstituteEuPolicy = "zero" | "average" | "newcomer";
+export type McrParticipantCountPolicy = "strict" | "lower" | "nearest" | "interpolate" | "skip";
 
 export interface Mcr2026Config {
   euWeight: number;
@@ -65,6 +66,8 @@ export interface Mcr2026Config {
   protectedEu: number;
   /** If true, a player who starts a tournament at kyu may finish it at most at 1 dan (EU 2000). */
   capKyuPromotionAtFirstDan: boolean;
+  /** How to handle participant counts missing from the normative KT_ЧУТ table. */
+  participantCountPolicy: McrParticipantCountPolicy;
 }
 
 export interface AgeWeight {
@@ -114,9 +117,22 @@ export interface TournamentDetail {
   nrktvt: number;
 }
 
+export interface MethodDiagnostic {
+  level: "warning" | "error";
+  code: string;
+  message: string;
+  tournamentId?: string;
+  tournamentName?: string;
+  tournamentDate?: string;
+}
+
 export interface CalculationResult {
   ranking: RankingRow[];
   tournamentRows: TournamentDetail[];
+  diagnostics?: MethodDiagnostic[];
+  isComplete?: boolean;
+  processedTournamentCount?: number;
+  skippedTournamentCount?: number;
 }
 
 export interface CalculationOptions {

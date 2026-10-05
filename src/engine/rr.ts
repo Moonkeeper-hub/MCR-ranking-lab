@@ -1,4 +1,4 @@
-import type { PlayerInput, ResultInput } from "./types";
+import type { MethodDiagnostic, PlayerInput, ResultInput } from "./types";
 
 export interface RrRangeBand {
   /** Inclusive upper bound in players/sessions; null means infinity. */
@@ -76,6 +76,10 @@ export interface RrCalculationResult {
   ranking: RrRankingRow[];
   tournamentRows: RrTournamentContribution[];
   maxCoefficient: number;
+  diagnostics?: MethodDiagnostic[];
+  isComplete?: boolean;
+  processedTournamentCount?: number;
+  skippedTournamentCount?: number;
 }
 
 export const RR_DEFAULT_PLAYER_BANDS: RrRangeBand[] = [
@@ -372,7 +376,7 @@ export class RrEngine {
     const names = new Map(players.map((p) => [p.player_id, p.player_name]));
     const eligible = new Set(players.filter((p) => p.include_in_rating !== false).map((p) => p.player_id));
 
-    const rows = resultsInput
+    const windowRows = resultsInput
       .map((r) => ({
         ...r,
         player_id: String(r.player_id),
@@ -384,6 +388,32 @@ export class RrEngine {
         const d = parseDate(r.tournament_date);
         return d.getTime() > startDate.getTime() && d.getTime() <= ratingDate.getTime();
       });
+
+    const diagnostics: MethodDiagnostic[] = [];
+    const invalidTournamentKeys = new Set<string>();
+    const seenTournamentKeys = new Set<string>();
+    for (const row of windowRows) {
+      const key = eventKey(row);
+      if (seenTournamentKeys.has(key)) continue;
+      seenTournamentKeys.add(key);
+      const d = parseDate(row.tournament_date);
+      const after2018 = d.getUTCFullYear() >= 2018;
+      let reason = "";
+      if (row.participants < 16) reason = `N=${row.participants}: для RR требуется минимум 16 игроков`;
+      else if (after2018 && row.sessions < 4) reason = `H=${row.sessions}: с 2018 года для RR требуется минимум 4 ханчана`;
+      if (reason) {
+        invalidTournamentKeys.add(key);
+        diagnostics.push({
+          level: "warning",
+          code: "rr-tournament-ineligible",
+          message: reason,
+          tournamentId: String(row.tournament_id),
+          tournamentName: String(row.tournament_name),
+          tournamentDate: String(row.tournament_date),
+        });
+      }
+    }
+    const rows = windowRows.filter((row) => !invalidTournamentKeys.has(eventKey(row)));
 
     // One coefficient record per tournament, like TournamentCoefficients in Django.
     const tournamentRows = new Map<string, ResultInput>();
@@ -482,6 +512,14 @@ export class RrEngine {
     ranking.sort((a, b) => b.rating - a.rating || a.playerName.localeCompare(b.playerName, "ru"));
     ranking.forEach((row, index) => { row.rank = index + 1; });
 
-    return { ranking, tournamentRows: contributions, maxCoefficient };
+    return {
+      ranking,
+      tournamentRows: contributions,
+      maxCoefficient,
+      diagnostics,
+      isComplete: true,
+      processedTournamentCount: tournamentRows.size,
+      skippedTournamentCount: invalidTournamentKeys.size,
+    };
   }
 }
