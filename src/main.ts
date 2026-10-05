@@ -25,6 +25,7 @@ import type {
   RatingSnapshot,
 } from "./engine/types";
 import { loadCsvPair, playersFromCsv, resultsFromCsv } from "./data/csv";
+import { calculateRankingDistanceMetric, type RankingDistanceMetric } from "./analysis/rankingDistance";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 
@@ -115,6 +116,10 @@ let comparisonSortDir: "asc" | "desc" = "asc";
 let historyTableSortKey = "rankA";
 let historyTableSortDir: "asc" | "desc" = "asc";
 
+let distanceTopN = 100;
+let distanceStep = 5;
+const distanceMetricCache = new Map<string, RankingDistanceMetric>();
+
 
 function esc(v: unknown): string {
   return String(v ?? "").replace(/[&<>"']/g, (ch) => ({
@@ -196,6 +201,7 @@ function applyPreset(preset: SavedLabPreset): void {
 }
 
 function recalc(): void {
+  distanceMetricCache.clear();
   const evaluationDate = document.querySelector<HTMLInputElement>("#evaluationDate")?.value || evaluationDateState;
   evaluationDateState = evaluationDate;
   const overrides: TableOverrides = {};
@@ -609,6 +615,161 @@ function renderComparison(): void {
     };
   });
   host.querySelector<HTMLButtonElement>("#exportComparisonCsv")?.addEventListener("click", () => exportComparisonCsv(rows, presetResult));
+  renderDistanceMetrics();
+}
+
+
+function distanceHorizonMonths(methodId: string): number {
+  const option = historyMethodOptions().find((x) => x.id === methodId);
+  if (!option || option.method === "mcr") {
+    const config = option?.preset?.payload?.config ?? {};
+    return Number(config.maxAgeMonths ?? defaultMcr2026Config().maxAgeMonths);
+  }
+  const config = option.preset?.payload?.config ?? {};
+  return Number(config.ageZeroMonths ?? defaultRrConfig().ageZeroMonths);
+}
+
+function distanceMetricForMethod(methodId: string): RankingDistanceMetric {
+  const key = [methodId, evaluationDateState, historyInitialMode, distanceTopN, distanceStep].join("|");
+  const cached = distanceMetricCache.get(key);
+  if (cached) return cached;
+  const history = buildHistoryForMethod(methodId).filter((snapshot) => snapshot.event.tournamentDate <= evaluationDateState);
+  const metric = calculateRankingDistanceMetric({
+    snapshots: history.map((snapshot) => ({
+      event: snapshot.event,
+      ranking: snapshot.ranking.map((row) => ({ playerId: row.playerId, rank: row.rank })),
+      processedTournamentCount: snapshot.mcrResult?.processedTournamentCount ?? snapshot.rrResult?.processedTournamentCount,
+    })),
+    results: results.map((row) => ({
+      tournamentId: row.tournament_id,
+      tournamentDate: String(row.tournament_date),
+      tournamentOrder: Number(row.tournament_order ?? 0),
+      playerId: row.player_id,
+    })),
+    horizonMonths: distanceHorizonMonths(methodId),
+    topN: distanceTopN,
+    step: distanceStep,
+  });
+  distanceMetricCache.set(key, metric);
+  return metric;
+}
+
+function xmlEsc(value: unknown): string {
+  return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;",
+  }[ch]!));
+}
+
+function histogramPlotSvg(metric: RankingDistanceMetric, mode: "mean" | "normalized", title: string, xOffset = 0, maxOverride?: number): string {
+  const width = 700;
+  const height = 300;
+  const padLeft = 52;
+  const padRight = 18;
+  const padTop = 42;
+  const padBottom = 62;
+  const plotW = width - padLeft - padRight;
+  const plotH = height - padTop - padBottom;
+  const values = metric.bins.map((bin) => mode === "mean" ? bin.meanTournaments : bin.normalizedByAllTournaments);
+  const maxValue = Math.max(1e-9, maxOverride ?? Math.max(...values));
+  const slot = plotW / Math.max(1, metric.bins.length);
+  const barW = Math.max(1, slot * 0.76);
+  const fill = mode === "mean" ? "#5b8ff9" : "#61d9a3";
+  const labelEvery = Math.max(1, Math.ceil(metric.bins.length / 10));
+  const bars = metric.bins.map((bin, index) => {
+    const value = values[index];
+    const h = (value / maxValue) * plotH;
+    const x = padLeft + index * slot + (slot - barW) / 2;
+    const y = padTop + plotH - h;
+    const label = index % labelEvery === 0 || index === metric.bins.length - 1
+      ? `<text x="${(x + barW / 2).toFixed(1)}" y="${height - 37}" text-anchor="middle" class="axis-label">${xmlEsc(bin.label)}</text>`
+      : "";
+    return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(0, h).toFixed(1)}" rx="1" fill="${fill}"><title>${xmlEsc(bin.label)} · ${value.toFixed(3)} · n=${bin.observations}</title></rect>${label}`;
+  }).join("");
+  const grid = [0, .25, .5, .75, 1].map((q) => {
+    const y = padTop + plotH - q * plotH;
+    const value = maxValue * q;
+    return `<line x1="${padLeft}" y1="${y.toFixed(1)}" x2="${width - padRight}" y2="${y.toFixed(1)}" class="grid-line"/><text x="${padLeft - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end" class="axis-label">${value < 10 ? value.toFixed(2) : value.toFixed(1)}</text>`;
+  }).join("");
+  return `<g transform="translate(${xOffset},0)"><text x="${padLeft}" y="22" class="plot-title">${xmlEsc(title)}</text>${grid}<line x1="${padLeft}" y1="${padTop}" x2="${padLeft}" y2="${padTop + plotH}" class="axis-line"/><line x1="${padLeft}" y1="${padTop + plotH}" x2="${width - padRight}" y2="${padTop + plotH}" class="axis-line"/>${bars}<text x="${padLeft + plotW / 2}" y="${height - 7}" text-anchor="middle" class="axis-title">Место в рейтинге</text></g>`;
+}
+
+function distancePairSvg(methodName: string, metric: RankingDistanceMetric): string {
+  const width = 1400;
+  const height = 340;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img">
+    <style>.bg{fill:#111827}.plot-title{fill:#f8fafc;font:600 15px system-ui,sans-serif}.axis-label{fill:#94a3b8;font:10px system-ui,sans-serif}.axis-title{fill:#cbd5e1;font:11px system-ui,sans-serif}.axis-line{stroke:#64748b;stroke-width:1}.grid-line{stroke:#334155;stroke-width:1}.method-title{fill:#f8fafc;font:700 18px system-ui,sans-serif}</style>
+    <rect class="bg" width="100%" height="100%" rx="12"/>
+    <text x="18" y="24" class="method-title">${xmlEsc(methodName)} · Top-${metric.topN} · шаг ${metric.step} · окно ${metric.horizonMonths} мес.</text>
+    <g transform="translate(0,34)">${histogramPlotSvg(metric, "mean", "Среднее число турниров до места", 0)}${histogramPlotSvg(metric, "normalized", "Σ турниров / все турниры рейтинга", 700)}</g>
+  </svg>`;
+}
+
+function distanceCsv(methodName: string, metric: RankingDistanceMetric): string {
+  const lines = [["method","rank_from","rank_to","observations","tournament_sum","mean_tournaments","normalized_by_all_tournaments","horizon_months","processed_tournaments"].map(csvCell).join(",")];
+  metric.bins.forEach((bin) => lines.push([
+    methodName, bin.from, bin.to, bin.observations, bin.tournamentSum,
+    bin.meanTournaments, bin.normalizedByAllTournaments,
+    metric.horizonMonths, metric.totalProcessedTournaments,
+  ].map(csvCell).join(",")));
+  return lines.join("\r\n");
+}
+
+function renderDistanceMetrics(): void {
+  const host = document.querySelector<HTMLDivElement>("#distanceMetricMethods");
+  if (!host) return;
+  const methodIds = ["mcr-default", "rr-default"];
+  if (comparisonPresetId) methodIds.push(`preset:${comparisonPresetId}`);
+  const uniqueIds = [...new Set(methodIds)].filter((id) => historyMethodOptions().some((option) => option.id === id));
+  if (!players.length || !results.length) {
+    host.innerHTML = `<div class="notice">Загрузите dataset, чтобы рассчитать метрику дистанции.</div>`;
+    return;
+  }
+
+  const calculated = uniqueIds.map((methodId) => {
+    const name = historyMethodLabel(methodId);
+    try {
+      return { methodId, name, metric: distanceMetricForMethod(methodId), error: null as string | null };
+    } catch (error) {
+      return { methodId, name, metric: null, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+  const successful = calculated.filter((x): x is { methodId:string; name:string; metric:RankingDistanceMetric; error:null } => Boolean(x.metric));
+  const sharedMeanMax = Math.max(1e-9, ...successful.flatMap((x) => x.metric.bins.map((bin) => bin.meanTournaments)));
+  const sharedNormalizedMax = Math.max(1e-9, ...successful.flatMap((x) => x.metric.bins.map((bin) => bin.normalizedByAllTournaments)));
+
+  host.innerHTML = calculated.map(({ methodId, name, metric, error }) => {
+    if (!metric) return `<article class="distance-method-card"><h3>${esc(name)}</h3><div class="notice error">${esc(error)}</div></article>`;
+    const firstCount = metric.observations.filter((x) => x.kind === "first").length;
+    const repeatCount = metric.observations.filter((x) => x.kind === "repeat").length;
+    const endCount = metric.observations.filter((x) => x.kind === "end").length;
+    const nonEmptyBins = metric.bins.filter((x) => x.observations > 0).length;
+    return `<article class="distance-method-card" data-distance-method="${esc(methodId)}">
+      <div class="distance-method-head"><div><h3>${esc(name)}</h3><div class="reference-labels"><span>окно ${metric.horizonMonths} мес.</span><span>${metric.players} игроков</span><span>${metric.totalProcessedTournaments} турниров</span><span>${metric.observations.length} наблюдений</span></div></div>
+      <div class="distance-actions"><button class="download-button" data-distance-svg="${esc(methodId)}" type="button">↓ SVG</button><button class="download-button" data-distance-csv="${esc(methodId)}" type="button">↓ CSV</button></div></div>
+      <div class="distance-observation-summary"><span>первое достижение: <strong>${firstCount}</strong></span><span>повторное: <strong>${repeatCount}</strong></span><span>конец истории: <strong>${endCount}</strong></span><span>непустых диапазонов: <strong>${nonEmptyBins}</strong></span></div>
+      <div class="distance-chart-pair">
+        <div class="distance-chart"><div class="snapshot-subtitle">Среднее число сыгранных турниров</div><svg viewBox="0 0 700 300" role="img" aria-label="${esc(name)} — средняя дистанция"><style>.plot-title{fill:currentColor;font:600 15px system-ui,sans-serif}.axis-label{fill:#94a3b8;font:10px system-ui,sans-serif}.axis-title{fill:#94a3b8;font:11px system-ui,sans-serif}.axis-line{stroke:#64748b}.grid-line{stroke:#334155}</style>${histogramPlotSvg(metric,"mean","Σ турниров / число наблюдений",0,sharedMeanMax)}</svg></div>
+        <div class="distance-chart"><div class="snapshot-subtitle">Нормировка на все турниры рейтинга</div><svg viewBox="0 0 700 300" role="img" aria-label="${esc(name)} — нормированная дистанция"><style>.plot-title{fill:currentColor;font:600 15px system-ui,sans-serif}.axis-label{fill:#94a3b8;font:10px system-ui,sans-serif}.axis-title{fill:#94a3b8;font:11px system-ui,sans-serif}.axis-line{stroke:#64748b}.grid-line{stroke:#334155}</style>${histogramPlotSvg(metric,"normalized","Σ турниров / все турниры рейтинга",0,sharedNormalizedMax)}</svg></div>
+      </div>
+    </article>`;
+  }).join("");
+
+  host.querySelectorAll<HTMLButtonElement>("[data-distance-svg]").forEach((button) => {
+    button.onclick = () => {
+      const methodId = button.dataset.distanceSvg!;
+      const metric = distanceMetricForMethod(methodId);
+      const name = historyMethodLabel(methodId);
+      downloadTextFile(`distance-${methodId.replace(/[^a-z0-9_-]+/gi,"-")}.svg`, distancePairSvg(name, metric), "image/svg+xml;charset=utf-8");
+    };
+  });
+  host.querySelectorAll<HTMLButtonElement>("[data-distance-csv]").forEach((button) => {
+    button.onclick = () => {
+      const methodId = button.dataset.distanceCsv!;
+      const metric = distanceMetricForMethod(methodId);
+      const name = historyMethodLabel(methodId);
+      downloadTextFile(`distance-${methodId.replace(/[^a-z0-9_-]+/gi,"-")}.csv`, distanceCsv(name, metric));
+    };
+  });
 }
 
 function renderShell(): void {
@@ -652,7 +813,7 @@ function renderShell(): void {
 
   app.innerHTML = `
     <div class="app">
-      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.28.4 · TypeScript · MCR-2026 + RR · расчёт выполняется в браузере</div></div>
+      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.29 · TypeScript · MCR-2026 + RR · Comparison · расчёт выполняется в браузере</div></div>
         <div class="topbar-actions"><div class="privacy-pill">CSV остаются на устройстве пользователя</div>
         <div class="support-wrap"><button id="supportButton" class="support-button" type="button">Donate / Support</button>
         <div id="supportPopover" class="support-popover" hidden><strong>Поддержать проект</strong><span>Перевод по номеру телефона на Сбербанк</span><div class="support-number-row"><code>+7 967 087 1525</code><button id="copySupportNumber" type="button">Копировать</button></div><span id="supportCopyStatus" class="micro"></span></div></div></div>
@@ -671,7 +832,16 @@ function renderShell(): void {
             <div class="comparison-toolbar"><label>Пользовательский пресет <select id="comparisonPresetSelect"><option value="">Без пользовательского пресета</option></select></label></div>
             <div id="comparisonRanking"></div>
           </section>
-          <section class="results-card comparison-next-card"><div class="eyebrow">v0.29</div><h2>Метрика дистанции</h2><div class="notice">Пары гистограмм «турниров до достижения / повторного достижения места» будут добавлены сюда следующим патчем. Архитектура уже сравнивает один dataset через независимые движки и пользовательские пресеты.</div></section>
+          <section class="results-card distance-card">
+            <div class="results-head"><div><div class="eyebrow">Метрика дистанции</div><h2>Сколько турниров требуется, чтобы занять и повторно занять место</h2>
+              <div class="formula-caption">Для каждого рассчитанного метода строятся две одинаково сгруппированные гистограммы: средняя дистанция в сыгранных турнирах и сумма дистанций, нормированная на общее число турниров метода.</div></div></div>
+            <div class="distance-toolbar">
+              <label>Top-N <input id="distanceTopN" type="number" min="1" max="500" step="1" value="${distanceTopN}"></label>
+              <label>Шаг мест <input id="distanceStep" type="range" min="1" max="10" step="1" value="${distanceStep}"><output id="distanceStepValue">${distanceStep}</output></label>
+            </div>
+            <details class="distance-explainer"><summary>Как считается метрика</summary><div class="notice">Для каждого игрока берётся первый полный горизонт устаревания конкретной методики и определяется лучшее достигнутое в нём место. Первая обязательная пара — число зачётных турниров игрока за этот начальный горизонт и достигнутое место. Затем считается число его турниров до каждого повторного достижения того же или более высокого места; более высокое место становится новой целью. Последний незавершённый отрезок до конца истории также включается отдельным наблюдением. В графики входят места в пределах выбранного Top-N.</div></details>
+            <div id="distanceMetricMethods" class="distance-methods"></div>
+          </section>
 
           <section class="history-card history-embedded">
             <div class="history-header"><div><div class="eyebrow">История / симуляция</div><div class="formula-caption">Шкала истории сохранена ниже сравнения методик.</div></div>
@@ -747,7 +917,9 @@ function renderShell(): void {
   const support=document.getElementById("supportButton"); support?.addEventListener("click",()=>{ const pop=document.getElementById("supportPopover") as HTMLDivElement; pop.hidden=!pop.hidden; });
   document.getElementById("copySupportNumber")?.addEventListener("click", async()=>{ const value="+7 967 087 1525"; try{await navigator.clipboard.writeText(value); const x=document.getElementById("supportCopyStatus"); if(x)x.textContent="Номер скопирован";}catch{const x=document.getElementById("supportCopyStatus"); if(x)x.textContent=value;} });
 
-  document.getElementById("historyInitialMode")?.addEventListener("change",(e)=>{historyInitialMode=(e.currentTarget as HTMLSelectElement).value as InitialStateMode;historyDirty=true;historySnapshotIndex=0;renderHistoryWorkspace();});
+  document.getElementById("distanceTopN")?.addEventListener("change",(e)=>{distanceTopN=Math.max(1,Math.min(500,Math.floor(Number((e.currentTarget as HTMLInputElement).value)||100)));distanceMetricCache.clear();renderDistanceMetrics();});
+  document.getElementById("distanceStep")?.addEventListener("input",(e)=>{distanceStep=Math.max(1,Math.min(10,Math.floor(Number((e.currentTarget as HTMLInputElement).value)||1)));const out=document.getElementById("distanceStepValue");if(out)out.textContent=String(distanceStep);distanceMetricCache.clear();renderDistanceMetrics();});
+  document.getElementById("historyInitialMode")?.addEventListener("change",(e)=>{historyInitialMode=(e.currentTarget as HTMLSelectElement).value as InitialStateMode;historyDirty=true;historySnapshotIndex=0;distanceMetricCache.clear();renderHistoryWorkspace();renderDistanceMetrics();});
   document.getElementById("historySlider")?.addEventListener("input",(e)=>{historySnapshotIndex=Number((e.currentTarget as HTMLInputElement).value);historyExpandedPlayerId=null;renderHistorySnapshot();});
   document.getElementById("historyPlayerSelect")?.addEventListener("change",(e)=>{historyPlayerId=(e.currentTarget as HTMLSelectElement).value||null;renderHistoryPlayerChart();});
 }
