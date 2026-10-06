@@ -4,7 +4,11 @@ export type RatingWorkerJob =
   | { kind: "mcr"; config: unknown; overrides: unknown; evaluationDate: string }
   | { kind: "rr"; config: unknown; overrides: unknown; evaluationDate: string }
   | { kind: "mcr-history"; config: unknown; overrides: unknown; initialMode: string }
-  | { kind: "rr-history"; config: unknown; overrides: unknown };
+  | { kind: "rr-history"; config: unknown; overrides: unknown }
+  | { kind: "trueskill"; config: unknown; evaluationDate: string }
+  | { kind: "trueskill-history"; config: unknown }
+  | { kind: "elo-pl"; config: unknown; evaluationDate: string }
+  | { kind: "elo-pl-history"; config: unknown };
 
 interface QueueItem<T = unknown> {
   id: number;

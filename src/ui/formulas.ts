@@ -125,3 +125,30 @@ export function renderRrMath(config: RrConfig): string {
   return `<div class="math-formula-stack"><div class="math-line math-line-primary">${rating}</div><div class="math-line math-line-secondary">${br}</div><div class="math-line">${weight}</div><div class="math-line math-line-secondary">${cut}</div><div class="math-line">${delta}</div><div class="math-line math-line-secondary">${age}</div><div class="math-line math-line-secondary">${count}</div><div class="math-line">${p1}</div><div class="math-line">${p2}</div></div>`;
 }
 
+
+import type { TrueSkillTournamentConfig } from "../engine/trueskillTournament";
+import type { EloPlConfig } from "../engine/eloPl";
+
+export function renderTrueSkillTournamentMath(config: TrueSkillTournamentConfig): string {
+  const mu=n(25*config.muCoef), sigma=n((25/3)*config.sigmaCoef), beta=n((25/6)*config.betaCoef), tau=n((25/300)*config.tauCoef,4), k=n(3*config.kCoef);
+  const main=render(String.raw`${hotspot("R","tsR")}=${hotspot("\\mu","tsMu")}-${hotspot(k,"tsK")}\,${hotspot("\\sigma","tsSigma")}`);
+  const init=render(String.raw`${hotspot("\\mu_0","tsMu")}=${hotspot(mu,"tsMuCoef")},\quad ${hotspot("\\sigma_0","tsSigma")}=${hotspot(sigma,"tsSigmaCoef")},\quad ${hotspot("\\beta","tsBeta")}=${hotspot(beta,"tsBetaCoef")}`);
+  const decay=render(String.raw`${hotspot("\\sigma_{prior}","tsDecay")}=\sqrt{${hotspot("\\sigma^2","tsSigma")}+\left(${hotspot(tau,"tsTauCoef")}\sqrt{${hotspot("\\Delta t_{years}","tsTime")}}\right)^2}`);
+  const tw=render(String.raw`${hotspot("w_T","tsTournamentWeight")}=1+\frac{${hotspot(n(config.tournamentCorrectionCoef),"tsTournamentCoef")}}{3}\cdot\frac{\frac{${hotspot(n(config.participantsCoef),"tsParticipantsCoef")}}{3}${hotspot("s_N","tsSizeSignal")}+\frac{${hotspot(n(config.sessionsCoef),"tsSessionsCoef")}}{3}${hotspot("s_H","tsSessionSignal")}}{2}`);
+  const upd=render(String.raw`${hotspot("\\mu'","tsUpdate")}=${hotspot("\\mu","tsMu")}+${hotspot("w_T","tsTournamentWeight")}\left(${hotspot("\\mu_{TS}","tsRawUpdate")}-${hotspot("\\mu","tsMu")}
+ight),\quad ${hotspot("\\sigma'","tsUpdate")}=${hotspot("\\sigma","tsSigma")}+${hotspot("w_T","tsTournamentWeight")}\left(${hotspot("\\sigma_{TS}","tsRawUpdate")}-${hotspot("\\sigma","tsSigma")}
+ight)`);
+  return `<div class="math-formula-stack"><div class="math-line math-line-primary">${main}</div><div class="math-line math-line-secondary">${init}</div><div class="math-line">${decay}</div><div class="math-line math-line-secondary">${tw}</div><div class="math-line">${upd}</div></div>`;
+}
+
+export function renderEloPlMath(config: EloPlConfig): string {
+  const p=render(String.raw`${hotspot("P(\\pi)","plLikelihood")}=\prod_{i=1}^{N}\frac{\exp\left(${hotspot("r_{\\pi_i}","plRating")}/${hotspot(n(config.plScale,2),"plScale")}\right)}{\sum_{j=i}^{N}\exp\left(${hotspot("r_{\\pi_j}","plRating")}/${hotspot(n(config.plScale,2),"plScale")}\right)}`);
+  const start=render(String.raw`${hotspot("r_0","plStart")}=${hotspot(n(config.startRating,0),"plStart")}`);
+  const g=render(String.raw`${hotspot("g_j","plGradient")}=1-\sum_{i=1}^{j}\frac{\exp(r_j/s)}{\sum_{k=i}^{N}\exp(r_k/s)}`);
+  const factors=render(String.raw`${hotspot("F_N","plSizeCoef")}=1+\frac{${hotspot(n(config.sizeCoef),"plSizeCoef")}}{3}\frac{N-${hotspot(String(config.minPlayers),"plMinPlayers")}}{N},\quad ${hotspot("F_H","plSessionsCoef")}=1+\frac{${hotspot(n(config.sessionsCoef),"plSessionsCoef")}}{3}\frac{H-4}{H},\quad ${hotspot("F_E","plExperienceCoef")}=1+\frac{${hotspot(n(config.experienceCoef),"plExperienceCoef")}/3}{1+T/${hotspot(String(config.experienceHalfLife),"plHalfLife")}}`);
+  const k=render(String.raw`${hotspot("K_j","plKeff")}=${hotspot(n(config.baseK,2),"plBaseK")}\cdot${hotspot("F_N","plSizeCoef")}\cdot${hotspot("F_E","plExperienceCoef")}\cdot${hotspot("F_H","plSessionsCoef")}`);
+  const upd=render(String.raw`${hotspot("r'_j","plUpdate")}=${hotspot("r_j","plRating")}+${hotspot("K_j","plKeff")}\,${hotspot("g_j","plGradient")}`);
+  const norm=render(String.raw`${hotspot("r_{display}","plNormalization")}=${hotspot("\\mathrm{Normalize}_{"+config.normalization.replace("-","\\text{-}")+"}","plNormalization")}\left(r\right)`);
+  return `<div class="math-formula-stack"><div class="math-line math-line-primary">${p}</div><div class="math-line math-line-secondary">${start}</div><div class="math-line math-line-secondary">${g}</div><div class="math-line">${factors}</div><div class="math-line">${k}</div><div class="math-line math-line-secondary">${upd}</div><div class="math-line math-line-secondary">${norm}</div></div>`;
+}
+

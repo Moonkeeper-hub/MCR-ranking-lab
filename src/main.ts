@@ -1,7 +1,7 @@
 
 import "./styles.css";
 import "katex/dist/katex.min.css";
-import { renderMcr2026Math, renderRrMath } from "./ui/formulas";
+import { renderMcr2026Math, renderRrMath, renderTrueSkillTournamentMath, renderEloPlMath } from "./ui/formulas";
 import { defaultMcr2026Config } from "./engine/legacy";
 import {
   defaultRrConfig, RR_DEFAULT_PLAYER_BANDS, RR_DEFAULT_SESSION_BANDS,
@@ -27,6 +27,8 @@ import { loadCsvPair, playersFromCsv, resultsFromCsv } from "./data/csv";
 import { calculateRankingDistanceMetric, type RankingDistanceMetric } from "./analysis/rankingDistance";
 import { LruCache, stableSerialize } from "./performanceCache";
 import { RatingWorkerPool } from "./workerPool";
+import { defaultTrueSkillTournamentConfig, type TrueSkillTournamentConfig, type TrueSkillTournamentResult } from "./engine/trueskillTournament";
+import { defaultEloPlConfig, type EloPlConfig, type EloPlResult, type EloNormalization } from "./engine/eloPl";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 
@@ -46,12 +48,21 @@ let rrTypeMultipliers: Record<string, number> = { ...RR_DEFAULT_TYPE_MULTIPLIERS
 let rrSpecialCoefficients: RrSpecialCoefficient[] = RR_DEFAULT_SPECIAL_COEFFICIENTS.map((x) => ({ ...x }));
 let rrCurrent: RrCalculationResult | null = null;
 let rrReference: RrCalculationResult | null = null;
+let trueSkillConfig: TrueSkillTournamentConfig = defaultTrueSkillTournamentConfig();
+let trueSkillCurrent: TrueSkillTournamentResult | null = null;
+let trueSkillReference: TrueSkillTournamentResult | null = null;
+let eloPlConfig: EloPlConfig = defaultEloPlConfig();
+let eloPlCurrent: EloPlResult | null = null;
+let eloPlReference: EloPlResult | null = null;
+let activeTrueSkillFormulaToken: string | null = null;
+let activeEloPlFormulaToken: string | null = null;
 let dataLabel = "встроенный demo dataset";
 let evaluationDateState = todayIso();
 let activeFormulaToken: string | null = null;
 let activeRrFormulaToken: string | null = null;
 let activeReferenceTab = 0;
-let activeLabMethod: "mcr" | "rr" = "mcr";
+type LabMethod = "mcr" | "rr" | "trueskill" | "elo-pl";
+let activeLabMethod: LabMethod = "mcr";
 let comparisonPresetId = "";
 
 type RankingSortKey =
@@ -121,11 +132,15 @@ let distanceStep = 5;
 let datasetRevision = 0;
 const mcrCalculationCache = new LruCache<CalculationResult>(24);
 const rrCalculationCache = new LruCache<RrCalculationResult>(24);
+const trueSkillCalculationCache = new LruCache<TrueSkillTournamentResult>(24);
+const eloPlCalculationCache = new LruCache<EloPlResult>(24);
 const historyMethodCache = new LruCache<UnifiedHistorySnapshot[]>(12);
 const distanceMetricCache = new LruCache<RankingDistanceMetric>(24);
 const ratingWorkers = new RatingWorkerPool();
 const mcrInFlight = new Map<string, Promise<CalculationResult>>();
 const rrInFlight = new Map<string, Promise<RrCalculationResult>>();
+const trueSkillInFlight = new Map<string, Promise<TrueSkillTournamentResult>>();
+const eloPlInFlight = new Map<string, Promise<EloPlResult>>();
 const historyInFlight = new Map<string, Promise<UnifiedHistorySnapshot[]>>();
 let recalcTimer: number | undefined;
 let recalcGeneration = 0;
@@ -138,6 +153,8 @@ let eventRowsCache = new Map<string, ResultInput[]>();
 function clearDatasetCaches(): void {
   mcrCalculationCache.clear();
   rrCalculationCache.clear();
+  trueSkillCalculationCache.clear();
+  eloPlCalculationCache.clear();
   historyMethodCache.clear();
   distanceMetricCache.clear();
   orderedEventsCacheRevision = -1;
@@ -145,6 +162,8 @@ function clearDatasetCaches(): void {
   eventRowsCache = new Map();
   mcrInFlight.clear();
   rrInFlight.clear();
+  trueSkillInFlight.clear();
+  eloPlInFlight.clear();
   historyInFlight.clear();
 }
 
@@ -205,6 +224,26 @@ async function calculateRrCachedAsync(
   return promise;
 }
 
+function trueSkillCalculationKey(config: TrueSkillTournamentConfig, evaluationDate: string): string {
+  return `trueskill|${datasetRevision}|${evaluationDate}|${stableSerialize(config)}`;
+}
+function eloPlCalculationKey(config: EloPlConfig, evaluationDate: string): string {
+  return `elo-pl|${datasetRevision}|${evaluationDate}|${stableSerialize(config)}`;
+}
+function getTrueSkillCached(config: TrueSkillTournamentConfig, evaluationDate: string): TrueSkillTournamentResult | undefined {
+  return trueSkillCalculationCache.get(trueSkillCalculationKey(config, evaluationDate));
+}
+function getEloPlCached(config: EloPlConfig, evaluationDate: string): EloPlResult | undefined {
+  return eloPlCalculationCache.get(eloPlCalculationKey(config, evaluationDate));
+}
+async function calculateTrueSkillCachedAsync(config: TrueSkillTournamentConfig, evaluationDate: string): Promise<TrueSkillTournamentResult> {
+  const key=trueSkillCalculationKey(config,evaluationDate); const cached=trueSkillCalculationCache.get(key); if(cached)return cached; const running=trueSkillInFlight.get(key); if(running)return running;
+  const promise=ratingWorkers.run<TrueSkillTournamentResult>({kind:"trueskill",config,evaluationDate}).then((result)=>{trueSkillCalculationCache.set(key,result);return result;}).finally(()=>trueSkillInFlight.delete(key)); trueSkillInFlight.set(key,promise); return promise;
+}
+async function calculateEloPlCachedAsync(config: EloPlConfig, evaluationDate: string): Promise<EloPlResult> {
+  const key=eloPlCalculationKey(config,evaluationDate); const cached=eloPlCalculationCache.get(key); if(cached)return cached; const running=eloPlInFlight.get(key); if(running)return running;
+  const promise=ratingWorkers.run<EloPlResult>({kind:"elo-pl",config,evaluationDate}).then((result)=>{eloPlCalculationCache.set(key,result);return result;}).finally(()=>eloPlInFlight.delete(key)); eloPlInFlight.set(key,promise); return promise;
+}
 
 function esc(v: unknown): string {
   return String(v ?? "").replace(/[&<>"']/g, (ch) => ({
@@ -225,7 +264,7 @@ function byId<T extends HTMLElement>(id: string): T {
 interface SavedLabPreset {
   id: string;
   name: string;
-  method: "mcr" | "rr";
+  method: LabMethod;
   savedAt: string;
   payload: any;
 }
@@ -257,13 +296,15 @@ function captureCurrentPreset(name: string): SavedLabPreset {
       vtExperiment: vtExperiment.map((x) => ({ ...x })),
     }};
   }
-  return { id, name, method: "rr", savedAt: new Date().toISOString(), payload: {
+  if (activeLabMethod === "rr") return { id, name, method: "rr", savedAt: new Date().toISOString(), payload: {
     config: { ...rrConfig },
     playerBands: rrPlayerBands.map((x) => ({ ...x })),
     sessionBands: rrSessionBands.map((x) => ({ ...x })),
     typeMultipliers: { ...rrTypeMultipliers },
     specialCoefficients: rrSpecialCoefficients.map((x) => ({ ...x })),
   }};
+  if (activeLabMethod === "trueskill") return { id, name, method: "trueskill", savedAt: new Date().toISOString(), payload: { config: { ...trueSkillConfig } } };
+  return { id, name, method: "elo-pl", savedAt: new Date().toISOString(), payload: { config: { ...eloPlConfig } } };
 }
 
 function applyPreset(preset: SavedLabPreset): void {
@@ -276,12 +317,16 @@ function applyPreset(preset: SavedLabPreset): void {
     vtExperiment = Array.isArray(preset.payload?.vtExperiment)
       ? preset.payload.vtExperiment.map((x: any) => ({ ...x }))
       : MCR2026_AGE_WEIGHTS.map((x) => ({ ...x }));
-  } else {
+  } else if (preset.method === "rr") {
     rrConfig = { ...defaultRrConfig(), ...(preset.payload?.config ?? {}) };
     rrPlayerBands = (preset.payload?.playerBands ?? RR_DEFAULT_PLAYER_BANDS).map((x: RrRangeBand) => ({ ...x }));
     rrSessionBands = (preset.payload?.sessionBands ?? RR_DEFAULT_SESSION_BANDS).map((x: RrRangeBand) => ({ ...x }));
     rrTypeMultipliers = { ...RR_DEFAULT_TYPE_MULTIPLIERS, ...(preset.payload?.typeMultipliers ?? {}) };
     rrSpecialCoefficients = (preset.payload?.specialCoefficients ?? RR_DEFAULT_SPECIAL_COEFFICIENTS).map((x: RrSpecialCoefficient) => ({ ...x }));
+  } else if (preset.method === "trueskill") {
+    trueSkillConfig = { ...defaultTrueSkillTournamentConfig(), ...(preset.payload?.config ?? {}) };
+  } else {
+    eloPlConfig = { ...defaultEloPlConfig(), ...(preset.payload?.config ?? {}) };
   }
 }
 
@@ -329,6 +374,10 @@ async function recalc(): Promise<void> {
     calculateMcrCachedAsync(defaultMcr2026Config(), {}, evaluationDate),
     calculateRrCachedAsync(rrConfig, rrOverrides, evaluationDate),
     calculateRrCachedAsync(defaultRrConfig(), rrDefaultOverrides, evaluationDate),
+    calculateTrueSkillCachedAsync(trueSkillConfig, evaluationDate),
+    calculateTrueSkillCachedAsync(defaultTrueSkillTournamentConfig(), evaluationDate),
+    calculateEloPlCachedAsync(eloPlConfig, evaluationDate),
+    calculateEloPlCachedAsync(defaultEloPlConfig(), evaluationDate),
   ]);
   if (generation !== recalcGeneration) return;
 
@@ -341,6 +390,10 @@ async function recalc(): Promise<void> {
   reference = assign(jobs[1] as PromiseSettledResult<CalculationResult>, "MCR-2026 default");
   rrCurrent = assign(jobs[2] as PromiseSettledResult<RrCalculationResult>, "RR lab");
   rrReference = assign(jobs[3] as PromiseSettledResult<RrCalculationResult>, "RR default");
+  trueSkillCurrent = assign(jobs[4] as PromiseSettledResult<TrueSkillTournamentResult>, "TrueSkill Tournament lab");
+  trueSkillReference = assign(jobs[5] as PromiseSettledResult<TrueSkillTournamentResult>, "TrueSkill Tournament default");
+  eloPlCurrent = assign(jobs[6] as PromiseSettledResult<EloPlResult>, "Elo-PL lab");
+  eloPlReference = assign(jobs[7] as PromiseSettledResult<EloPlResult>, "Elo-PL default");
 
   // Selected comparison preset is warmed in the same two-worker queues so the
   // comparison renderer never has to start a cold calculation on the UI thread.
@@ -362,8 +415,10 @@ async function recalc(): Promise<void> {
     ? `MCR ${reference.isComplete === false ? "⚠ неполный" : "✓"}: ${reference.ranking.length}`
     : "MCR ✕";
   const rrText = rrReference ? `RR ✓: ${rrReference.ranking.length}` : "RR ✕";
+  const tsText = trueSkillReference ? `TS ✓: ${trueSkillReference.ranking.length}` : "TS ✕";
+  const plText = eloPlReference ? `Elo-PL ✓: ${eloPlReference.ranking.length}` : "Elo-PL ✕";
   const detail = errors.length ? ` · ${errors.join(" · ")}` : "";
-  setStatus(`Срез ${evaluationDate}: ${visibleResults} результатов · ${mcrText} · ${rrText}${detail}`, errors.length === 0);
+  setStatus(`Срез ${evaluationDate}: ${visibleResults} результатов · ${mcrText} · ${rrText} · ${tsText} · ${plText}${detail}`, errors.length === 0);
 }
 
 function setStatus(text: string, ok = true): void {
@@ -524,6 +579,34 @@ function renderRrControls(): void {
   bindRrControls();
 }
 
+type TrueSkillNumericKey = Exclude<keyof TrueSkillTournamentConfig, never>;
+const TS_CONTROL_DEFS: Array<{key: TrueSkillNumericKey; label:string; min:number; max:number; step:number; digits?:number}> = [
+  {key:"muCoef",label:"μ coefficient",min:0,max:3,step:0.05},
+  {key:"sigmaCoef",label:"σ coefficient",min:0.05,max:3,step:0.05},
+  {key:"betaCoef",label:"β coefficient",min:0.05,max:3,step:0.05},
+  {key:"tauCoef",label:"τ / decay coefficient",min:0,max:3,step:0.05},
+  {key:"kCoef",label:"k в μ − kσ",min:0,max:3,step:0.05},
+  {key:"tournamentCorrectionCoef",label:"Турнирная поправка",min:0,max:3,step:0.05},
+  {key:"participantsCoef",label:"Вес размера турнира",min:0,max:3,step:0.05},
+  {key:"sessionsCoef",label:"Вес числа ханчанов",min:0,max:3,step:0.05},
+  {key:"minPlayers",label:"Минимум игроков",min:4,max:128,step:1,digits:0},
+];
+function tsControlHtml(def: typeof TS_CONTROL_DEFS[number]): string { const value=Number(trueSkillConfig[def.key]); return `<div class="control-row"><div class="control-head"><label>${esc(def.label)}</label><span class="control-value">${value.toFixed(def.digits??2)}</span></div><input data-ts-config-key="${String(def.key)}" type="range" min="${def.min}" max="${def.max}" step="${def.step}" value="${value}"></div>`; }
+function bindTrueSkillControls(root: ParentNode=document): void { root.querySelectorAll<HTMLInputElement>("[data-ts-config-key]").forEach((input)=>{input.oninput=()=>{const key=input.dataset.tsConfigKey as TrueSkillNumericKey; (trueSkillConfig[key] as number)=Number(input.value); const def=TS_CONTROL_DEFS.find(x=>x.key===key)!; const out=input.closest(".control-row")?.querySelector<HTMLElement>(".control-value"); if(out)out.textContent=Number(input.value).toFixed(def.digits??2); scheduleRecalc();};}); }
+
+const ELO_CONTROL_DEFS: Array<{key: Exclude<keyof EloPlConfig,"normalization">; label:string; min:number; max:number; step:number; digits?:number}> = [
+  {key:"startRating",label:"Стартовый рейтинг",min:500,max:2500,step:10,digits:0},
+  {key:"baseK",label:"Base K",min:1,max:128,step:1,digits:0},
+  {key:"plScale",label:"PL scale / temperature",min:25,max:500,step:5,digits:0},
+  {key:"sizeCoef",label:"Влияние размера турнира",min:0,max:3,step:0.05},
+  {key:"experienceCoef",label:"Влияние опыта игрока",min:0,max:3,step:0.05},
+  {key:"sessionsCoef",label:"Влияние числа ханчанов",min:0,max:3,step:0.05},
+  {key:"experienceHalfLife",label:"Опыт: half-life, турниров",min:1,max:50,step:1,digits:0},
+  {key:"minPlayers",label:"Минимум игроков",min:4,max:128,step:1,digits:0},
+];
+function eloControlHtml(def: typeof ELO_CONTROL_DEFS[number]): string { const value=Number(eloPlConfig[def.key]); return `<div class="control-row"><div class="control-head"><label>${esc(def.label)}</label><span class="control-value">${value.toFixed(def.digits??2)}</span></div><input data-elo-config-key="${String(def.key)}" type="range" min="${def.min}" max="${def.max}" step="${def.step}" value="${value}"></div>`; }
+function bindEloControls(root: ParentNode=document): void { root.querySelectorAll<HTMLInputElement>("[data-elo-config-key]").forEach((input)=>{input.oninput=()=>{const key=input.dataset.eloConfigKey as Exclude<keyof EloPlConfig,"normalization">; (eloPlConfig[key] as number)=Number(input.value); const def=ELO_CONTROL_DEFS.find(x=>x.key===key)!; const out=input.closest(".control-row")?.querySelector<HTMLElement>(".control-value"); if(out)out.textContent=Number(input.value).toFixed(def.digits??2); scheduleRecalc();};}); root.querySelectorAll<HTMLSelectElement>("[data-elo-normalization]").forEach((select)=>{select.onchange=()=>{eloPlConfig.normalization=select.value as EloNormalization; scheduleRecalc();};}); }
+
 function rrBandTable(bands: RrRangeBand[], kind: "player" | "session"): string {
   const unit = kind === "player" ? "игроков" : "туров";
   return `<div class="table-wrap compact-table"><table class="editor-table">
@@ -594,12 +677,16 @@ async function warmSavedPreset(preset: SavedLabPreset, evaluationDate: string): 
     await calculateMcrCachedAsync({ ...defaultMcr2026Config(), ...(payload.config ?? {}) }, overrides, evaluationDate);
     return;
   }
-  await calculateRrCachedAsync({ ...defaultRrConfig(), ...(payload.config ?? {}) }, {
-    playerBands: payload.playerBands ?? RR_DEFAULT_PLAYER_BANDS,
-    sessionBands: payload.sessionBands ?? RR_DEFAULT_SESSION_BANDS,
-    tournamentTypeMultipliers: payload.typeMultipliers ?? RR_DEFAULT_TYPE_MULTIPLIERS,
-    specialCoefficients: payload.specialCoefficients ?? RR_DEFAULT_SPECIAL_COEFFICIENTS,
-  }, evaluationDate);
+  if (preset.method === "rr") {
+    await calculateRrCachedAsync({ ...defaultRrConfig(), ...(payload.config ?? {}) }, {
+      playerBands: payload.playerBands ?? RR_DEFAULT_PLAYER_BANDS,
+      sessionBands: payload.sessionBands ?? RR_DEFAULT_SESSION_BANDS,
+      tournamentTypeMultipliers: payload.typeMultipliers ?? RR_DEFAULT_TYPE_MULTIPLIERS,
+      specialCoefficients: payload.specialCoefficients ?? RR_DEFAULT_SPECIAL_COEFFICIENTS,
+    }, evaluationDate); return;
+  }
+  if (preset.method === "trueskill") { await calculateTrueSkillCachedAsync({ ...defaultTrueSkillTournamentConfig(), ...(payload.config ?? {}) }, evaluationDate); return; }
+  await calculateEloPlCachedAsync({ ...defaultEloPlConfig(), ...(payload.config ?? {}) }, evaluationDate);
 }
 
 function calculateSavedPreset(preset: SavedLabPreset, evaluationDate: string): { name: string; method: string; ranking: Array<{playerId:string; playerName:string; rank:number; rating:number}> } | null {
@@ -611,16 +698,24 @@ function calculateSavedPreset(preset: SavedLabPreset, evaluationDate: string): {
     const result = getMcrCached({ ...defaultMcr2026Config(), ...(payload.config ?? {}) }, overrides, evaluationDate);
     return result ? { name: preset.name, method: "MCR", ranking: result.ranking.map((x) => ({ playerId:x.playerId, playerName:x.playerName, rank:x.rank, rating:x.rating })) } : null;
   }
-  const result = getRrCached({ ...defaultRrConfig(), ...(payload.config ?? {}) }, {
-    playerBands: payload.playerBands ?? RR_DEFAULT_PLAYER_BANDS,
-    sessionBands: payload.sessionBands ?? RR_DEFAULT_SESSION_BANDS,
-    tournamentTypeMultipliers: payload.typeMultipliers ?? RR_DEFAULT_TYPE_MULTIPLIERS,
-    specialCoefficients: payload.specialCoefficients ?? RR_DEFAULT_SPECIAL_COEFFICIENTS,
-  }, evaluationDate);
-  return result ? { name: preset.name, method: "RR", ranking: result.ranking.map((x) => ({ playerId:x.playerId, playerName:x.playerName, rank:x.rank, rating:x.rating })) } : null;
+  if (preset.method === "rr") {
+    const result = getRrCached({ ...defaultRrConfig(), ...(payload.config ?? {}) }, {
+      playerBands: payload.playerBands ?? RR_DEFAULT_PLAYER_BANDS,
+      sessionBands: payload.sessionBands ?? RR_DEFAULT_SESSION_BANDS,
+      tournamentTypeMultipliers: payload.typeMultipliers ?? RR_DEFAULT_TYPE_MULTIPLIERS,
+      specialCoefficients: payload.specialCoefficients ?? RR_DEFAULT_SPECIAL_COEFFICIENTS,
+    }, evaluationDate);
+    return result ? { name: preset.name, method: "RR", ranking: result.ranking.map((x) => ({ playerId:x.playerId, playerName:x.playerName, rank:x.rank, rating:x.rating })) } : null;
+  }
+  if (preset.method === "trueskill") {
+    const result=getTrueSkillCached({ ...defaultTrueSkillTournamentConfig(), ...(payload.config ?? {}) }, evaluationDate);
+    return result ? { name:preset.name, method:"TrueSkill Tournament", ranking:result.ranking.map(x=>({playerId:x.playerId,playerName:x.playerName,rank:x.rank,rating:x.rating})) } : null;
+  }
+  const result=getEloPlCached({ ...defaultEloPlConfig(), ...(payload.config ?? {}) }, evaluationDate);
+  return result ? { name:preset.name, method:"Elo-PL", ranking:result.ranking.map(x=>({playerId:x.playerId,playerName:x.playerName,rank:x.rank,rating:x.rating})) } : null;
 }
 
-function diagnosticSummaryHtml(title: string, result: { diagnostics?: any[]; isComplete?: boolean; processedTournamentCount?: number; skippedTournamentCount?: number } | null, kind: "mcr" | "rr"): string {
+function diagnosticSummaryHtml(title: string, result: { diagnostics?: any[]; isComplete?: boolean; processedTournamentCount?: number; skippedTournamentCount?: number } | null, kind: "mcr" | "rr" | "trueskill" | "elo-pl"): string {
   if (!result) return `<div class="method-validation error"><strong>${esc(title)}</strong><span>Расчёт не выполнен.</span></div>`;
   const diagnostics = result.diagnostics ?? [];
   const groups = new Map<string, number>();
@@ -639,109 +734,45 @@ function comparisonSortHeader(label: string, key: string): string {
 }
 
 function exportComparisonCsv(rows: any[], presetResult: any | null): void {
-  const header = ["player_id","player_name","mcr_rank","rr_rank","delta_rr_minus_mcr"];
-  if (presetResult) header.push("preset_name","preset_rank","delta_preset_minus_mcr");
-  header.push("mcr_rating","rr_rating");
-  const lines = [header.map(csvCell).join(",")];
-  rows.forEach((x) => {
-    const d = x.deltaRank;
-    const pd = x.mcrRank !== null && x.presetRank !== null ? x.mcrRank - x.presetRank : null;
-    const row: unknown[] = [x.playerId,x.playerName,x.mcrRank ?? "",x.rrRank ?? "",d ?? ""];
-    if (presetResult) row.push(presetResult.name,x.presetRank ?? "",pd ?? "");
-    row.push(x.mcrRating ?? "",x.rrRating ?? "");
+  const header = ["player_id","player_name","mcr_rank","rr_rank","trueskill_rank","elo_pl_rank","delta_rr_minus_mcr","delta_trueskill_minus_mcr","delta_elo_pl_minus_mcr","mcr_rating","rr_rating","trueskill_rating","elo_pl_rating"];
+  if (presetResult) header.push("preset_name","preset_rank","delta_preset_minus_mcr","preset_rating");
+  const lines=[header.map(csvCell).join(",")];
+  for(const x of rows){
+    const row:unknown[]=[x.playerId,x.playerName,x.mcrRank??"",x.rrRank??"",x.tsRank??"",x.eloRank??"",x.deltaRr??"",x.deltaTs??"",x.deltaElo??"",x.mcrRating??"",x.rrRating??"",x.tsRating??"",x.eloRating??""];
+    if(presetResult)row.push(presetResult.name,x.presetRank??"",x.deltaPreset??"",x.presetRating??"");
     lines.push(row.map(csvCell).join(","));
-  });
-  downloadTextFile(`method-comparison-${evaluationDateState}.csv`, lines.join("\r\n"));
+  }
+  downloadTextFile(`method-comparison-${evaluationDateState}.csv`,lines.join("\r\n"));
 }
 
 function renderComparison(): void {
-  const host = document.querySelector<HTMLDivElement>("#comparisonRanking");
-  const metrics = document.querySelector<HTMLDivElement>("#comparisonMetrics");
-  if (!host || !metrics) return;
-
-  const presets = loadPresets();
-  const presetSelect = document.querySelector<HTMLSelectElement>("#comparisonPresetSelect");
-  if (presetSelect) {
-    const existing = comparisonPresetId;
-    presetSelect.innerHTML = `<option value="">Без пользовательского пресета</option>` + presets.map((p) =>
-      `<option value="${esc(p.id)}" ${p.id === existing ? "selected" : ""}>${esc(p.name)} · ${p.method.toUpperCase()}</option>`
-    ).join("");
-    presetSelect.onchange = () => { comparisonPresetId = presetSelect.value; void recalc(); };
-  }
-
-  const evaluationDate = document.querySelector<HTMLInputElement>("#evaluationDate")?.value || evaluationDateState;
-  const selectedPreset = comparisonPresetId ? presets.find((p) => p.id === comparisonPresetId) : undefined;
-  const presetResult = selectedPreset ? calculateSavedPreset(selectedPreset, evaluationDate) : null;
-
-  const mcrById = new Map((reference?.ranking ?? []).map((x) => [x.playerId, x]));
-  const rrById = new Map((rrReference?.ranking ?? []).map((x) => [x.playerId, x]));
-  const presetById = new Map((presetResult?.ranking ?? []).map((x) => [x.playerId, x]));
-  const ids = new Set([...mcrById.keys(), ...rrById.keys(), ...presetById.keys()]);
-  let rows = [...ids].map((playerId) => {
-    const m = mcrById.get(playerId);
-    const r = rrById.get(playerId);
-    const p = presetById.get(playerId);
-    return {
-      playerId,
-      playerName: m?.playerName ?? r?.playerName ?? p?.playerName ?? playerId,
-      mcrRank: m?.rank ?? null,
-      rrRank: r?.rank ?? null,
-      presetRank: p?.rank ?? null,
-      mcrRating: m?.rating ?? null,
-      rrRating: r?.rating ?? null,
-      presetRating: p?.rating ?? null,
-      deltaRank: m && r ? m.rank - r.rank : null,
-    };
-  });
-
-  const sortValue = (x: any): any => x[comparisonSortKey];
-  rows.sort((a,b) => {
-    const av=sortValue(a), bv=sortValue(b);
-    if (av === null || av === undefined) return 1;
-    if (bv === null || bv === undefined) return -1;
-    let cmp = typeof av === "string" ? String(av).localeCompare(String(bv), "ru") : Number(av)-Number(bv);
-    return comparisonSortDir === "asc" ? cmp : -cmp;
-  });
-
-  const shared = rows.filter((x) => x.mcrRank !== null && x.rrRank !== null);
-  const meanAbs = shared.length ? shared.reduce((sum,x)=>sum+Math.abs(x.deltaRank ?? 0),0)/shared.length : 0;
-  metrics.innerHTML = `<div><span>MCR-2026 default</span><strong>${reference?.ranking.length ?? "—"}</strong></div>
-    <div><span>RR default</span><strong>${rrReference?.ranking.length ?? "—"}</strong></div>
-    <div><span>Средний |Δ места|</span><strong>${shared.length ? fmt(meanAbs,1) : "—"}</strong></div>
-    ${presetResult ? `<div><span>${esc(presetResult.name)}</span><strong>${presetResult.ranking.length}</strong></div>` : ""}`;
-
-  const validationHtml = `<div class="method-validation-grid">
-    ${diagnosticSummaryHtml("MCR-2026 default", reference, "mcr")}
-    ${diagnosticSummaryHtml("RR default", rrReference, "rr")}
-  </div>`;
-
-  const presetHeaders = presetResult
-    ? `<th>${comparisonSortHeader(`${presetResult.name} #`, "presetRank")}</th><th>Δ preset−MCR</th>` : "";
-  host.innerHTML = `${validationHtml}
-    <div class="ranking-toolbar"><div class="micro">${rows.length} игроков</div><button id="exportComparisonCsv" class="download-button" type="button">↓ CSV</button></div>
-    <div class="table-wrap ranking-wrap"><table class="ranking-table comparison-table">
-    <thead><tr><th>${comparisonSortHeader("Игрок", "playerName")}</th><th>${comparisonSortHeader("MCR-2026 #", "mcrRank")}</th><th>${comparisonSortHeader("RR #", "rrRank")}</th><th>${comparisonSortHeader("Δ RR−MCR", "deltaRank")}</th>${presetHeaders}<th>${comparisonSortHeader("MCR Rating", "mcrRating")}</th><th>${comparisonSortHeader("RR", "rrRating")}</th></tr></thead>
-    <tbody>${rows.map((x)=>{
-      const d=x.deltaRank;
-      const pd=x.mcrRank!==null && x.presetRank!==null ? x.mcrRank-x.presetRank : null;
-      return `<tr><td>${esc(x.playerName)}</td><td>${x.mcrRank ?? "—"}</td><td>${x.rrRank ?? "—"}</td>
-        <td class="${d && d>0?"pos":d&&d<0?"neg":""}">${d===null?"—":`${d>=0?"+":""}${d}`}</td>
-        ${presetResult ? `<td>${x.presetRank ?? "—"}</td><td class="${pd && pd>0?"pos":pd&&pd<0?"neg":""}">${pd===null?"—":`${pd>=0?"+":""}${pd}`}</td>` : ""}
-        <td>${x.mcrRating===null?"—":fmt(x.mcrRating)}</td><td>${x.rrRating===null?"—":fmt(x.rrRating)}</td></tr>`;
-    }).join("")}</tbody></table></div>`;
-
-  host.querySelectorAll<HTMLButtonElement>("[data-comparison-sort]").forEach((button) => {
-    button.onclick = () => {
-      const key = button.dataset.comparisonSort!;
-      if (comparisonSortKey === key) comparisonSortDir = comparisonSortDir === "asc" ? "desc" : "asc";
-      else { comparisonSortKey = key; comparisonSortDir = "asc"; }
-      renderComparison();
-    };
-  });
-  host.querySelector<HTMLButtonElement>("#exportComparisonCsv")?.addEventListener("click", () => exportComparisonCsv(rows, presetResult));
+  const host=document.querySelector<HTMLDivElement>("#comparisonRanking");
+  const metrics=document.querySelector<HTMLDivElement>("#comparisonMetrics");
+  if(!host||!metrics)return;
+  const presets=loadPresets();
+  const presetSelect=document.querySelector<HTMLSelectElement>("#comparisonPresetSelect");
+  if(presetSelect){const existing=comparisonPresetId;presetSelect.innerHTML=`<option value="">Без пользовательского пресета</option>`+presets.map(p=>`<option value="${esc(p.id)}" ${p.id===existing?"selected":""}>${esc(p.name)} · ${esc(labMethodName(p.method))}</option>`).join("");presetSelect.onchange=()=>{comparisonPresetId=presetSelect.value;void recalc();};}
+  const evaluationDate=document.querySelector<HTMLInputElement>("#evaluationDate")?.value||evaluationDateState;
+  const selectedPreset=comparisonPresetId?presets.find(p=>p.id===comparisonPresetId):undefined;
+  const presetResult=selectedPreset?calculateSavedPreset(selectedPreset,evaluationDate):null;
+  const mcrById=new Map((reference?.ranking??[]).map(x=>[x.playerId,x]));
+  const rrById=new Map((rrReference?.ranking??[]).map(x=>[x.playerId,x]));
+  const tsById=new Map((trueSkillReference?.ranking??[]).map(x=>[x.playerId,x]));
+  const eloById=new Map((eloPlReference?.ranking??[]).map(x=>[x.playerId,x]));
+  const presetById=new Map((presetResult?.ranking??[]).map(x=>[x.playerId,x]));
+  const ids=new Set([...mcrById.keys(),...rrById.keys(),...tsById.keys(),...eloById.keys(),...presetById.keys()]);
+  let rows=[...ids].map(playerId=>{const m=mcrById.get(playerId),r=rrById.get(playerId),t=tsById.get(playerId),e=eloById.get(playerId),p=presetById.get(playerId);const mRank=m?.rank??null;return{playerId,playerName:m?.playerName??r?.playerName??t?.playerName??e?.playerName??p?.playerName??playerId,mcrRank:mRank,rrRank:r?.rank??null,tsRank:t?.rank??null,eloRank:e?.rank??null,presetRank:p?.rank??null,mcrRating:m?.rating??null,rrRating:r?.rating??null,tsRating:t?.rating??null,eloRating:e?.rating??null,presetRating:p?.rating??null,deltaRr:m&&r?m.rank-r.rank:null,deltaTs:m&&t?m.rank-t.rank:null,deltaElo:m&&e?m.rank-e.rank:null,deltaPreset:m&&p?m.rank-p.rank:null};});
+  rows.sort((a:any,b:any)=>{const av=a[comparisonSortKey],bv=b[comparisonSortKey];if(av===null||av===undefined)return 1;if(bv===null||bv===undefined)return-1;const cmp=typeof av==="string"?String(av).localeCompare(String(bv),"ru"):Number(av)-Number(bv);return comparisonSortDir==="asc"?cmp:-cmp;});
+  const sharedRr=rows.filter(x=>x.mcrRank!==null&&x.rrRank!==null);const sharedTs=rows.filter(x=>x.mcrRank!==null&&x.tsRank!==null);const sharedElo=rows.filter(x=>x.mcrRank!==null&&x.eloRank!==null);
+  const mean=(xs:any[],key:string)=>xs.length?xs.reduce((a,x)=>a+Math.abs(Number(x[key]??0)),0)/xs.length:NaN;
+  metrics.innerHTML=`<div><span>MCR-2026</span><strong>${reference?.ranking.length??"—"}</strong></div><div><span>RR</span><strong>${rrReference?.ranking.length??"—"}</strong></div><div><span>TrueSkill Tournament</span><strong>${trueSkillReference?.ranking.length??"—"}</strong></div><div><span>Elo-PL</span><strong>${eloPlReference?.ranking.length??"—"}</strong></div><div><span>|Δ| RR↔MCR</span><strong>${Number.isFinite(mean(sharedRr,"deltaRr"))?fmt(mean(sharedRr,"deltaRr"),1):"—"}</strong></div><div><span>|Δ| TS↔MCR</span><strong>${Number.isFinite(mean(sharedTs,"deltaTs"))?fmt(mean(sharedTs,"deltaTs"),1):"—"}</strong></div><div><span>|Δ| Elo↔MCR</span><strong>${Number.isFinite(mean(sharedElo,"deltaElo"))?fmt(mean(sharedElo,"deltaElo"),1):"—"}</strong></div>`;
+  const validationHtml=`<div class="method-validation-grid">${diagnosticSummaryHtml("MCR-2026 default",reference,"mcr")}${diagnosticSummaryHtml("RR default",rrReference,"rr")}${diagnosticSummaryHtml("TrueSkill Tournament default",trueSkillReference,"trueskill")}${diagnosticSummaryHtml("Elo-PL default",eloPlReference,"elo-pl")}</div>`;
+  const presetHeaders=presetResult?`<th>${comparisonSortHeader(`${presetResult.name} #`,"presetRank")}</th><th>Δ preset−MCR</th>`:"";
+  host.innerHTML=`${validationHtml}<div class="ranking-toolbar"><div class="micro">${rows.length} игроков</div><button id="exportComparisonCsv" class="download-button" type="button">↓ CSV</button></div><div class="table-wrap ranking-wrap"><table class="ranking-table comparison-table"><thead><tr><th>${comparisonSortHeader("Игрок","playerName")}</th><th>${comparisonSortHeader("MCR #","mcrRank")}</th><th>${comparisonSortHeader("RR #","rrRank")}</th><th>${comparisonSortHeader("TS #","tsRank")}</th><th>${comparisonSortHeader("Elo-PL #","eloRank")}</th><th>Δ RR−MCR</th><th>Δ TS−MCR</th><th>Δ Elo−MCR</th>${presetHeaders}</tr></thead><tbody>${rows.map((x:any)=>`<tr><td>${esc(x.playerName)}</td><td>${x.mcrRank??"—"}</td><td>${x.rrRank??"—"}</td><td>${x.tsRank??"—"}</td><td>${x.eloRank??"—"}</td><td>${x.deltaRr===null?"—":`${x.deltaRr>=0?"+":""}${x.deltaRr}`}</td><td>${x.deltaTs===null?"—":`${x.deltaTs>=0?"+":""}${x.deltaTs}`}</td><td>${x.deltaElo===null?"—":`${x.deltaElo>=0?"+":""}${x.deltaElo}`}</td>${presetResult?`<td>${x.presetRank??"—"}</td><td>${x.deltaPreset===null?"—":`${x.deltaPreset>=0?"+":""}${x.deltaPreset}`}</td>`:""}</tr>`).join("")}</tbody></table></div>`;
+  host.querySelectorAll<HTMLButtonElement>("[data-comparison-sort]").forEach(button=>button.onclick=()=>{const key=button.dataset.comparisonSort!;if(comparisonSortKey===key)comparisonSortDir=comparisonSortDir==="asc"?"desc":"asc";else{comparisonSortKey=key;comparisonSortDir="asc";}renderComparison();});
+  host.querySelector<HTMLButtonElement>("#exportComparisonCsv")?.addEventListener("click",()=>exportComparisonCsv(rows,presetResult));
   renderDistanceMetrics();
 }
-
 
 function distanceHorizonMonths(methodId: string): number {
   const option = historyMethodOptions().find((x) => x.id === methodId);
@@ -749,8 +780,14 @@ function distanceHorizonMonths(methodId: string): number {
     const config = option?.preset?.payload?.config ?? {};
     return Number(config.maxAgeMonths ?? defaultMcr2026Config().maxAgeMonths);
   }
-  const config = option.preset?.payload?.config ?? {};
-  return Number(config.ageZeroMonths ?? defaultRrConfig().ageZeroMonths);
+  if (option.method === "rr") {
+    const config = option.preset?.payload?.config ?? {};
+    return Number(config.ageZeroMonths ?? defaultRrConfig().ageZeroMonths);
+  }
+  // TrueSkill Tournament and Elo-PL have no hard expiry cutoff. For Patrick's
+  // metric we use a neutral 24-month analysis horizon, matching the project's
+  // current cross-method comparison window rather than changing either engine.
+  return 24;
 }
 
 function distanceMetricForMethod(methodId: string): RankingDistanceMetric {
@@ -858,7 +895,7 @@ function ensureDistanceHistories(methodIds: string[]): void {
 function renderDistanceMetrics(): void {
   const host = document.querySelector<HTMLDivElement>("#distanceMetricMethods");
   if (!host) return;
-  const methodIds = ["mcr-default", "rr-default"];
+  const methodIds = ["mcr-default", "rr-default", "trueskill-default", "elo-pl-default"];
   if (comparisonPresetId) methodIds.push(`preset:${comparisonPresetId}`);
   const uniqueIds = [...new Set(methodIds)].filter((id) => historyMethodOptions().some((option) => option.id === id));
   if (!players.length || !results.length) {
@@ -914,6 +951,30 @@ function renderDistanceMetrics(): void {
   });
 }
 
+function labMethodName(method: LabMethod = activeLabMethod): string {
+  if (method === "mcr") return "MCR-2026";
+  if (method === "rr") return "RR";
+  if (method === "trueskill") return "TrueSkill Tournament";
+  return "Elo-PL";
+}
+function labMethodCaption(method: LabMethod = activeLabMethod): string {
+  if (method === "mcr") return "Основная формула и её компоненты";
+  if (method === "rr") return "Внутренний российский рейтинг: две части A и B";
+  if (method === "trueskill") return "Один турнир = одно multiplayer-наблюдение; состояние игрока задаётся μ и σ";
+  return "Plackett–Luce likelihood по полному порядку мест и Elo-подобное обновление";
+}
+function renderActiveFormula(): string {
+  if (activeLabMethod === "mcr") return renderMcr2026Math(currentConfig);
+  if (activeLabMethod === "rr") return renderRrMath(rrConfig);
+  if (activeLabMethod === "trueskill") return renderTrueSkillTournamentMath(trueSkillConfig);
+  return renderEloPlMath(eloPlConfig);
+}
+function alternativeMethodReferenceHtml(): string {
+  if (activeLabMethod === "trueskill") return `<details class="reference-card"><summary><span>TrueSkill Tournament — принятые допущения</span><span class="summary-note">турнирный вариант</span></summary><div class="reference-body rr-about"><p><strong>Наблюдение:</strong> весь турнир считается одним free-for-all multiplayer-наблюдением по итоговому порядку мест. Ничьих в данных не предполагается.</p><p><strong>Старт:</strong> канонические базовые значения μ=25, σ=25/3, β=25/6; каждый из них умножается на отдельный лабораторный коэффициент.</p><p><strong>Ранжирование:</strong> μ−kσ, базово k=3. Это conservative score: высокая неопределённость понижает позицию игрока.</p><p><strong>τ / decay:</strong> перед следующим турниром σ увеличивается календарно пропорционально √Δt; коэффициент 0 полностью отключает этот эффект, 3 делает его втрое сильнее.</p><p><strong>Турнирная поправка:</strong> после стандартного TrueSkill update изменение μ/σ масштабируется умеренным весом, зависящим отдельно от размера турнира и числа ханчанов. Общий коэффициент 0 выключает поправку.</p></div></details>`;
+  if (activeLabMethod === "elo-pl") return `<details class="reference-card"><summary><span>Elo-PL — принятые допущения</span><span class="summary-note">Plackett–Luce</span></summary><div class="reference-body rr-about"><p><strong>Наблюдение:</strong> полный итоговый порядок мест турнира. Вероятность порядка задаётся моделью Plackett–Luce.</p><p><strong>Старт:</strong> 1500. Внутреннее состояние всегда хранится на исходной Elo-шкале.</p><p><strong>K:</strong> эффективный K складывается из базового K и редактируемых множителей размера турнира, опыта игрока и числа ханчанов.</p><p><strong>Нормализация:</strong> Off / 0–1000 / 0–3000 влияет только на отображаемую шкалу. Следующие турниры всегда считаются по ненормированному внутреннему рейтингу.</p><p><strong>Турниры:</strong> любая валидная таблица итоговых мест с числом участников не меньше заданного минимума.</p></div></details>`;
+  return "";
+}
+
 function renderShell(): void {
   const presets = loadPresets().filter((p) => p.method === activeLabMethod);
   const mcrControls = `
@@ -952,10 +1013,19 @@ function renderShell(): void {
     <details class="side-section"><summary>Количество ханчанов K<sub>H</sub></summary><div class="section-body" id="rrSessionBands"></div></details>
     <details class="side-section"><summary>Турниры с отсечением</summary><div class="section-body" id="rrSpecialCoefficients"></div></details>
     <details class="side-section"><summary>Эксперимент: множитель типа турнира</summary><div class="section-body" id="rrTypeMultipliers"></div></details>`;
+  const trueSkillControls = `
+    <details class="side-section" open><summary>TrueSkill parameters</summary><div class="section-body">${TS_CONTROL_DEFS.filter(x=>["muCoef","sigmaCoef","betaCoef","kCoef"].includes(String(x.key))).map(tsControlHtml).join("")}</div></details>
+    <details class="side-section" open><summary>τ / календарное устаревание</summary><div class="section-body">${tsControlHtml(TS_CONTROL_DEFS.find(x=>x.key==="tauCoef")!)}</div></details>
+    <details class="side-section" open><summary>Турнирная поправка</summary><div class="section-body">${TS_CONTROL_DEFS.filter(x=>["tournamentCorrectionCoef","participantsCoef","sessionsCoef","minPlayers"].includes(String(x.key))).map(tsControlHtml).join("")}</div></details>`;
+  const eloControls = `
+    <details class="side-section" open><summary>Plackett–Luce / Elo</summary><div class="section-body">${ELO_CONTROL_DEFS.slice(0,3).map(eloControlHtml).join("")}</div></details>
+    <details class="side-section" open><summary>Множители K</summary><div class="section-body">${ELO_CONTROL_DEFS.slice(3).map(eloControlHtml).join("")}</div></details>
+    <details class="side-section"><summary>Отображение</summary><div class="section-body"><label class="select-row"><span>Нормализация</span><select data-elo-normalization><option value="off" ${eloPlConfig.normalization==="off"?"selected":""}>Off</option><option value="0-1000" ${eloPlConfig.normalization==="0-1000"?"selected":""}>0–1000</option><option value="0-3000" ${eloPlConfig.normalization==="0-3000"?"selected":""}>0–3000</option></select></label></div></details>`;
+  const methodControls = activeLabMethod === "mcr" ? mcrControls : activeLabMethod === "rr" ? rrControls : activeLabMethod === "trueskill" ? trueSkillControls : eloControls;
 
   app.innerHTML = `
     <div class="app">
-      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.29.2 · TypeScript · MCR-2026 + RR · Comparison · 2 workers + debounce · расчёт выполняется в браузере</div></div>
+      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.30.1 · TypeScript · MCR-2026 + RR + TrueSkill Tournament + Elo-PL · 2 workers · расчёт выполняется в браузере</div></div>
         <div class="topbar-actions"><div class="privacy-pill">CSV остаются на устройстве пользователя</div>
         <div class="support-wrap"><button id="supportButton" class="support-button" type="button">Donate / Support</button>
         <div id="supportPopover" class="support-popover" hidden><strong>Поддержать проект</strong><span>Перевод по номеру телефона на Сбербанк</span><div class="support-number-row"><code>+7 967 087 1525</code><button id="copySupportNumber" type="button">Копировать</button></div><span id="supportCopyStatus" class="micro"></span></div></div></div>
@@ -969,7 +1039,7 @@ function renderShell(): void {
       <section id="comparisonWorkspace" class="workspace-panel ${activeWorkspace === "comparison" ? "active" : ""} comparison-workspace">
         <main class="main comparison-main">
           <section class="results-card">
-            <div class="results-head"><div><div class="eyebrow">Сравнение методик</div><h2>MCR-2026 default ↔ RR default</h2>
+            <div class="results-head"><div><div class="eyebrow">Сравнение методик</div><h2>MCR-2026 · RR · TrueSkill Tournament · Elo-PL</h2>
               <div class="reference-labels"><span>Один dataset</span><span>сравниваем позиции, а не абсолютные шкалы</span></div></div><div id="comparisonMetrics" class="metrics-strip"></div></div>
             <div class="comparison-toolbar"><label>Пользовательский пресет <select id="comparisonPresetSelect"><option value="">Без пользовательского пресета</option></select></label></div>
             <div id="comparisonRanking"></div>
@@ -1000,22 +1070,22 @@ function renderShell(): void {
         <aside class="sidebar"><section class="side-card">
           <div class="side-title">Лаборатория методик</div>
           <div class="section-body compact-stack method-picker">
-            <label class="select-row"><span>Методика</span><select id="labMethodSelect"><option value="mcr" ${activeLabMethod === "mcr" ? "selected" : ""}>MCR-2026</option><option value="rr" ${activeLabMethod === "rr" ? "selected" : ""}>RR</option></select></label>
+            <label class="select-row"><span>Методика</span><select id="labMethodSelect"><option value="mcr" ${activeLabMethod === "mcr" ? "selected" : ""}>MCR-2026</option><option value="rr" ${activeLabMethod === "rr" ? "selected" : ""}>RR</option><option value="trueskill" ${activeLabMethod === "trueskill" ? "selected" : ""}>TrueSkill Tournament</option><option value="elo-pl" ${activeLabMethod === "elo-pl" ? "selected" : ""}>Elo-PL</option></select></label>
             <div class="preset-box"><label>Сохранённый пресет<select id="labPresetSelect"><option value="">— выбрать —</option>${presets.map((p)=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label>
             <div class="preset-save-row"><input id="presetName" type="text" placeholder="Название пресета"><button id="savePreset" type="button">Сохранить</button><button id="deletePreset" type="button">Удалить</button></div></div>
           </div>
           <details class="side-section" open><summary>Данные</summary><div class="section-body compact-stack"><div class="notice compact">Источник: <strong id="dataLabel"></strong></div><label class="file-row">players.csv <input id="playersFile" type="file" accept=".csv,text/csv"></label><label class="file-row">results.csv <input id="resultsFile" type="file" accept=".csv,text/csv"></label><div class="button-row"><button id="loadFiles" class="primary">Загрузить</button><button id="loadBuiltin">Demo dataset</button></div><div id="status" class="micro"></div></div></details>
-          ${activeLabMethod === "mcr" ? mcrControls : rrControls}
-          <div class="sidebar-footer"><label class="date-row">Дата рейтинга<input id="evaluationDate" type="date" value="${evaluationDateState}"></label><button id="resetMethodConfig" class="full">Сбросить ${activeLabMethod === "mcr" ? "MCR-2026" : "RR"} к default</button></div>
+          ${methodControls}
+          <div class="sidebar-footer"><label class="date-row">Дата рейтинга<input id="evaluationDate" type="date" value="${evaluationDateState}"></label><button id="resetMethodConfig" class="full">Сбросить ${labMethodName()} к default</button></div>
         </section></aside>
 
         <main class="main">
-          <section class="formula-card"><div class="eyebrow-row"><div><div class="eyebrow">${activeLabMethod === "mcr" ? "MCR-2026" : "RR"}</div><div class="formula-caption">${activeLabMethod === "mcr" ? "Основная формула и её компоненты" : "Внутренний российский рейтинг: две части A и B"}</div></div><div class="formula-badge">интерактивная формула</div></div>
-            <div id="legacyFormulaMount" class="legacy-formula-mount">${activeLabMethod === "mcr" ? renderMcr2026Math(currentConfig) : renderRrMath(rrConfig)}</div>
+          <section class="formula-card"><div class="eyebrow-row"><div><div class="eyebrow">${labMethodName()}</div><div class="formula-caption">${labMethodCaption()}</div></div><div class="formula-badge">интерактивная формула</div></div>
+            <div id="legacyFormulaMount" class="legacy-formula-mount">${renderActiveFormula()}</div>
             <div class="formula-hint">Нажмите на коэффициент или обозначение — ниже появятся пояснение и связанные редактируемые параметры.</div><div id="formulaInspector" class="formula-inspector"></div>
           </section>
-          ${activeLabMethod === "mcr" ? `<details class="reference-card"><summary><span>Справочники MCR-2026 — посмотреть и поиграть</span><span class="summary-note">канон + экспериментальные копии</span></summary><div class="reference-body"><div class="tabs" id="tabs"></div><div id="referencePanel"></div></div></details>` : `<details class="reference-card"><summary><span>RR — правила и допуски</span><span class="summary-note">исходная методика</span></summary><div class="reference-body rr-about"><p><strong>Окно:</strong> последние два года. В рейтинге отображаются игроки минимум с двумя неустаревшими турнирами.</p><p><strong>С 2018 года:</strong> в исходной системе учитываются аккредитованные открытые турниры от 16 игроков и от 4 ханчанов; клубные зарубежные турниры не учитываются. Browser-lab предполагает, что загруженный CSV уже отфильтрован по аккредитации/открытости, потому что этих полей в текущей схеме CSV нет.</p><p><strong>Игроки замены:</strong> входят в число участников N при расчёте базового ранга и коэффициента турнира, но сами не отображаются в RR.</p></div></details>`}
-          <section class="results-card"><div class="results-head"><div><h2>Рейтинговая таблица</h2><div class="reference-labels"><span>Текущая: <strong>${activeLabMethod === "mcr" ? "MCR-2026 / пользовательская конфигурация" : "RR / пользовательская конфигурация"}</strong></span><span>Эталон: <strong>${activeLabMethod === "mcr" ? "MCR-2026 default" : "RR default"}</strong></span></div></div><div id="metrics" class="metrics-strip"></div></div>
+          ${activeLabMethod === "mcr" ? `<details class="reference-card"><summary><span>Справочники MCR-2026 — посмотреть и поиграть</span><span class="summary-note">канон + экспериментальные копии</span></summary><div class="reference-body"><div class="tabs" id="tabs"></div><div id="referencePanel"></div></div></details>` : activeLabMethod === "rr" ? `<details class="reference-card"><summary><span>RR — правила и допуски</span><span class="summary-note">исходная методика</span></summary><div class="reference-body rr-about"><p><strong>Окно:</strong> последние два года. В рейтинге отображаются игроки минимум с двумя неустаревшими турнирами.</p><p><strong>С 2018 года:</strong> в исходной системе учитываются аккредитованные открытые турниры от 16 игроков и от 4 ханчанов; клубные зарубежные турниры не учитываются. Browser-lab предполагает, что загруженный CSV уже отфильтрован по аккредитации/открытости, потому что этих полей в текущей схеме CSV нет.</p><p><strong>Игроки замены:</strong> входят в число участников N при расчёте базового ранга и коэффициента турнира, но сами не отображаются в RR.</p></div></details>` : alternativeMethodReferenceHtml()}
+          <section class="results-card"><div class="results-head"><div><h2>Рейтинговая таблица</h2><div class="reference-labels"><span>Текущая: <strong>${labMethodName()} / пользовательская конфигурация</strong></span><span>Default: <strong>${labMethodName()} default</strong></span></div></div><div id="metrics" class="metrics-strip"></div></div>
             <div class="ranking-toolbar"><label class="ranking-search"><span>Поиск</span><input id="rankingSearch" type="search" placeholder="Игрок, ID…" value="${esc(rankingSearch)}"></label><div class="ranking-toolbar-actions"><span id="rankingVisibleCount" class="micro"></span><button id="exportRankingCsv" class="download-button" type="button">↓ CSV</button></div></div><div id="deltaLeaders" class="delta-leaders"></div><div id="ranking"></div>
           </section>
         </main>
@@ -1025,18 +1095,20 @@ function renderShell(): void {
   const dataLabelEl = document.getElementById("dataLabel"); if (dataLabelEl) dataLabelEl.textContent = dataLabel;
   bindNumericControls();
   renderRrControls();
+  bindTrueSkillControls();
+  bindEloControls();
   bindFormulaTokens();
   setupTabs();
   renderFormulaInspector();
 
   document.getElementById("workspaceComparison")?.addEventListener("click", () => setWorkspace("comparison"));
   document.getElementById("workspaceLab")?.addEventListener("click", () => setWorkspace("lab"));
-  document.getElementById("labMethodSelect")?.addEventListener("change", (e) => { activeLabMethod = (e.currentTarget as HTMLSelectElement).value as "mcr"|"rr"; activeFormulaToken=null; activeRrFormulaToken=null; renderShell(); recalc(); });
+  document.getElementById("labMethodSelect")?.addEventListener("change", (e) => { activeLabMethod = (e.currentTarget as HTMLSelectElement).value as LabMethod; activeFormulaToken=null; activeRrFormulaToken=null; activeTrueSkillFormulaToken=null; activeEloPlFormulaToken=null; renderShell(); recalc(); });
   document.getElementById("evaluationDate")?.addEventListener("change", (e)=>{ evaluationDateState=(e.currentTarget as HTMLInputElement).value; recalc(); });
   document.getElementById("loadFiles")?.addEventListener("click", loadFiles);
   document.getElementById("loadBuiltin")?.addEventListener("click", loadBuiltin);
   document.getElementById("rankingSearch")?.addEventListener("input", (e) => { rankingSearch=(e.currentTarget as HTMLInputElement).value; renderOutput(); });
-  document.getElementById("exportRankingCsv")?.addEventListener("click", () => activeLabMethod === "rr" ? exportRrRankingCsv() : exportRankingCsv());
+  document.getElementById("exportRankingCsv")?.addEventListener("click", () => { if(activeLabMethod==="rr") exportRrRankingCsv(); else if(activeLabMethod==="trueskill") exportTrueSkillCsv(); else if(activeLabMethod==="elo-pl") exportEloPlCsv(); else exportRankingCsv(); });
 
   document.getElementById("doubleStrikeMode")?.addEventListener("change", (e)=>{ currentConfig.doubleStrikeMode=(e.currentTarget as HTMLSelectElement).value as Mcr2026Config["doubleStrikeMode"]; recalc(); });
   document.getElementById("substituteEuPolicy")?.addEventListener("change", (e)=>{ currentConfig.substituteEuPolicy=(e.currentTarget as HTMLSelectElement).value as Mcr2026Config["substituteEuPolicy"]; recalc(); });
@@ -1045,8 +1117,10 @@ function renderShell(): void {
 
   document.getElementById("resetMethodConfig")?.addEventListener("click", ()=>{
     if (activeLabMethod === "mcr") { currentConfig=defaultMcr2026Config(); useKtExperiment=false; useVtExperiment=false; ktExperiment={...KT_PARTICIPANTS}; vtExperiment=MCR2026_AGE_WEIGHTS.map((x)=>({...x})); }
-    else { rrConfig=defaultRrConfig(); rrPlayerBands=RR_DEFAULT_PLAYER_BANDS.map((x)=>({...x})); rrSessionBands=RR_DEFAULT_SESSION_BANDS.map((x)=>({...x})); rrTypeMultipliers={...RR_DEFAULT_TYPE_MULTIPLIERS}; rrSpecialCoefficients=RR_DEFAULT_SPECIAL_COEFFICIENTS.map((x)=>({...x})); }
-    activeFormulaToken=null; activeRrFormulaToken=null; renderShell(); recalc();
+    else if(activeLabMethod === "rr") { rrConfig=defaultRrConfig(); rrPlayerBands=RR_DEFAULT_PLAYER_BANDS.map((x)=>({...x})); rrSessionBands=RR_DEFAULT_SESSION_BANDS.map((x)=>({...x})); rrTypeMultipliers={...RR_DEFAULT_TYPE_MULTIPLIERS}; rrSpecialCoefficients=RR_DEFAULT_SPECIAL_COEFFICIENTS.map((x)=>({...x})); }
+    else if(activeLabMethod === "trueskill") trueSkillConfig=defaultTrueSkillTournamentConfig();
+    else eloPlConfig=defaultEloPlConfig();
+    activeFormulaToken=null; activeRrFormulaToken=null; activeTrueSkillFormulaToken=null; activeEloPlFormulaToken=null; renderShell(); recalc();
   });
 
   document.getElementById("savePreset")?.addEventListener("click", ()=>{
@@ -1066,18 +1140,26 @@ function renderShell(): void {
   document.getElementById("historyPlayerSelect")?.addEventListener("change",(e)=>{historyPlayerId=(e.currentTarget as HTMLSelectElement).value||null;renderHistoryPlayerChart();});
 }
 
+function getActiveFormulaToken(): string | null {
+  if (activeLabMethod === "mcr") return activeFormulaToken;
+  if (activeLabMethod === "rr") return activeRrFormulaToken;
+  if (activeLabMethod === "trueskill") return activeTrueSkillFormulaToken;
+  return activeEloPlFormulaToken;
+}
+function setActiveFormulaToken(token: string | null): void {
+  if (activeLabMethod === "mcr") activeFormulaToken=token;
+  else if (activeLabMethod === "rr") activeRrFormulaToken=token;
+  else if (activeLabMethod === "trueskill") activeTrueSkillFormulaToken=token;
+  else activeEloPlFormulaToken=token;
+}
 function bindFormulaTokens(): void {
   document.querySelectorAll<HTMLElement>("[data-formula-token]").forEach((element) => {
     element.addEventListener("click", () => {
       const token = element.dataset.formulaToken!;
-      if (activeLabMethod === "rr") {
-        activeRrFormulaToken = activeRrFormulaToken === token ? null : token;
-      } else {
-        activeFormulaToken = activeFormulaToken === token ? null : token;
-      }
+      setActiveFormulaToken(getActiveFormulaToken() === token ? null : token);
       document.querySelectorAll<HTMLElement>("[data-formula-token]").forEach((el)=>el.classList.remove("selected"));
-      const active = activeLabMethod === "rr" ? activeRrFormulaToken : activeFormulaToken;
-      if (active) document.querySelectorAll<HTMLElement>(`[data-formula-token="${active}"]`).forEach((el)=>el.classList.add("selected"));
+      const active=getActiveFormulaToken();
+      if(active) document.querySelectorAll<HTMLElement>(`[data-formula-token="${active}"]`).forEach((el)=>el.classList.add("selected"));
       renderFormulaInspector();
     });
   });
@@ -1086,9 +1168,9 @@ function bindFormulaTokens(): void {
 function renderFormulaMath(): void {
   const mount = document.querySelector<HTMLDivElement>("#legacyFormulaMount");
   if (!mount) return;
-  mount.innerHTML = activeLabMethod === "rr" ? renderRrMath(rrConfig) : renderMcr2026Math(currentConfig);
+  mount.innerHTML = renderActiveFormula();
   bindFormulaTokens();
-  const active = activeLabMethod === "rr" ? activeRrFormulaToken : activeFormulaToken;
+  const active=getActiveFormulaToken();
   if (active) mount.querySelectorAll<HTMLElement>(`[data-formula-token="${active}"]`).forEach((el)=>el.classList.add("selected"));
 }
 
@@ -1234,9 +1316,64 @@ function rrInspectorTable(kind: "players"|"sessions"|"special"|"types"): string 
   return `<div class="inspector-table"><strong>Экспериментальный множитель типа турнира</strong><div class="table-wrap compact-table"><table class="editor-table"><tbody>${Object.entries(rrTypeMultipliers).map(([k,v])=>`<tr><td>${esc(k)}</td><td><input data-rr-type="${esc(k)}" type="number" step="0.05" value="${v.toFixed(2)}"></td></tr>`).join("")}</tbody></table></div></div>`;
 }
 
+const TS_TOKEN_HELP: Record<string,{title:string;text:string;keys?:TrueSkillNumericKey[]}> = {
+  tsR:{title:"Conservative rating R",text:"Сортировочный показатель TrueSkill Tournament: μ − kσ. Чем выше неопределённость σ, тем сильнее штрафуется позиция игрока.",keys:["kCoef"]},
+  tsMu:{title:"μ — оценка силы",text:"Среднее апостериорного распределения силы игрока. Каноническое стартовое значение TrueSkill — 25; в лаборатории оно умножается на μ coefficient.",keys:["muCoef"]},
+  tsSigma:{title:"σ — неопределённость",text:"Стандартное отклонение оценки силы. Канонический старт — 25/3. Высокое σ означает меньшую уверенность в оценке игрока.",keys:["sigmaCoef"]},
+  tsBeta:{title:"β — разброс результата",text:"Параметр performance variance TrueSkill. Каноническое значение β=25/6. Чем выше β, тем больше случайности модель допускает в результате одного турнира.",keys:["betaCoef"]},
+  tsMuCoef:{title:"μ coefficient",text:"Множитель канонического стартового μ=25. Default 1 сохраняет исходную шкалу TrueSkill.",keys:["muCoef"]},
+  tsSigmaCoef:{title:"σ coefficient",text:"Множитель канонического стартового σ=25/3. Default 1 сохраняет исходную неопределённость.",keys:["sigmaCoef"]},
+  tsBetaCoef:{title:"β coefficient",text:"Множитель канонического β=25/6. Default 1 сохраняет базовую чувствительность TrueSkill к результату.",keys:["betaCoef"]},
+  tsK:{title:"k в μ−kσ",text:"Коэффициент консервативного рейтинга. База k=3; параметр k coefficient умножает её. При coefficient=1 используется μ−3σ.",keys:["kCoef"]},
+  tsDecay:{title:"τ / календарное устаревание",text:"Перед следующим турниром σ увеличивается по времени с последнего участия: σprior = √(σ² + τ²·Δt). Это добавленная турнирная адаптация динамического параметра TrueSkill к календарной неактивности.",keys:["tauCoef"]},
+  tsTauCoef:{title:"τ coefficient",text:"Множитель базового τ=25/300. 0 полностью отключает календарное увеличение неопределённости, 1 — базовый режим, 3 — втрое сильнее.",keys:["tauCoef"]},
+  tsTime:{title:"Δt",text:"Время между предыдущим и текущим турниром конкретного игрока, измеренное в годах. Чужие турниры не увеличивают σ этого игрока."},
+  tsTournamentWeight:{title:"wT — турнирная поправка",text:"Масштабирует изменение μ и σ после стандартного multiplayer TrueSkill update. Вес зависит отдельно от размера турнира и числа ханчанов; общий coefficient=0 делает wT=1 и полностью выключает поправку.",keys:["tournamentCorrectionCoef","participantsCoef","sessionsCoef"]},
+  tsTournamentCoef:{title:"Tournament correction coefficient",text:"Общий регулятор турнирной поправки, 0–3. Ноль оставляет чистый TrueSkill update; остальные коэффициенты размера и дистанции применяются только через него.",keys:["tournamentCorrectionCoef"]},
+  tsParticipantsCoef:{title:"Participants coefficient",text:"Определяет, насколько размер турнира влияет на турнирный вес. Сигнал ограничен диапазоном 0–1 и растёт от минимального размера турнира.",keys:["participantsCoef","minPlayers"]},
+  tsSessionsCoef:{title:"Sessions coefficient",text:"Определяет, насколько число ханчанов влияет на турнирный вес. Базовая точка — 4 ханчана; дальнейший рост даёт убывающую добавку.",keys:["sessionsCoef"]},
+  tsSizeSignal:{title:"sN — сигнал размера турнира",text:"Нормированный показатель размера: (N−Nmin)/N, ограниченный 0…1. Он не является самостоятельным рейтингом, а только частью турнирной поправки.",keys:["participantsCoef","minPlayers"]},
+  tsSessionSignal:{title:"sH — сигнал дистанции",text:"Нормированный показатель числа ханчанов: (H−4)/H для H≥4. Используется только в турнирной поправке.",keys:["sessionsCoef"]},
+  tsUpdate:{title:"Итоговый update",text:"Сначала рассчитывается стандартный multiplayer TrueSkill по полному порядку мест. Затем разница между prior и raw TrueSkill posterior масштабируется wT."},
+  tsRawUpdate:{title:"Raw TrueSkill posterior",text:"μTS и σTS — результат стандартного TrueSkill factor-graph update для всего турнира как одного free-for-all наблюдения."},
+};
+
+const ELO_TOKEN_HELP: Record<string,{title:string;text:string;keys?:Array<Exclude<keyof EloPlConfig,"normalization">>;normalization?:boolean}> = {
+  plLikelihood:{title:"Plackett–Luce likelihood",text:"Вероятность полного турнирного порядка. На каждом шаге фактический следующий игрок выбирается из ещё не размещённых игроков пропорционально exp(r/s). Это не разложение турнира на независимые пары."},
+  plRating:{title:"r — внутренний Elo-PL rating",text:"Ненормированный внутренний рейтинг игрока. Опция нормализации влияет только на отображение и не меняет внутреннее состояние.",keys:["startRating"]},
+  plStart:{title:"r₀ — стартовый рейтинг",text:"Начальный внутренний рейтинг нового игрока. По умолчанию 1500.",keys:["startRating"]},
+  plScale:{title:"PL scale / temperature",text:"Температура экспоненты Plackett–Luce. Default 400/ln(10) делает отношение рейтингов близким по масштабу к привычной Elo-логистике.",keys:["plScale"]},
+  plGradient:{title:"g — градиент лог-правдоподобия",text:"Показывает, в какую сторону и насколько результат турнира должен сдвинуть рейтинг игрока. Все игроки турнира обновляются одновременно из одного полного порядка."},
+  plBaseK:{title:"Base K",text:"Базовый размер шага Elo-PL до применения поправок на размер турнира, опыт и число ханчанов.",keys:["baseK"]},
+  plKeff:{title:"Keff",text:"Эффективный K для конкретного игрока и турнира: Base K × фактор размера × фактор опыта × фактор числа ханчанов.",keys:["baseK","sizeCoef","experienceCoef","sessionsCoef","experienceHalfLife"]},
+  plSizeCoef:{title:"FN — размер турнира",text:"Множитель K, зависящий от размера турнира. Коэффициент 0 отключает этот фактор; 3 даёт максимально сильную предусмотренную поправку.",keys:["sizeCoef","minPlayers"]},
+  plExperienceCoef:{title:"FE — опыт игрока",text:"Новые игроки могут получать больший K. Влияние плавно уменьшается с числом сыгранных турниров; experience half-life задаёт скорость снижения.",keys:["experienceCoef","experienceHalfLife"]},
+  plSessionsCoef:{title:"FH — число ханчанов",text:"Множитель K по дистанции турнира. Базовая точка — 4 ханчана; коэффициент 0 полностью отключает фактор.",keys:["sessionsCoef"]},
+  plMinPlayers:{title:"Nmin — минимальный размер турнира",text:"Турниры с меньшим числом участников не входят в расчёт. Этот же порог служит нулевой точкой размерной поправки K.",keys:["minPlayers"]},
+  plHalfLife:{title:"Experience half-life",text:"Число турниров, задающее скорость снижения бонуса K для новых игроков. При T=half-life опытный множитель уже заметно ближе к 1.",keys:["experienceHalfLife","experienceCoef"]},
+  plNormalization:{title:"Нормализация отображаемой шкалы",text:"Off показывает внутренний Elo-PL rating. 0–1000 и 0–3000 линейно растягивают текущую отображаемую таблицу; внутренний рейтинг и последующие обновления не меняются.",normalization:true},
+  plUpdate:{title:"Обновление Elo-PL",text:"После вычисления градиента полного Plackett–Luce порядка внутренний рейтинг одновременно обновляется как r′=r+Keff·g."},
+};
+
 function renderFormulaInspector(): void {
   const panel = document.querySelector<HTMLDivElement>("#formulaInspector");
   if (!panel) return;
+
+  if (activeLabMethod === "trueskill") {
+    if (!activeTrueSkillFormulaToken) { panel.innerHTML=""; panel.classList.remove("open"); return; }
+    const item=TS_TOKEN_HELP[activeTrueSkillFormulaToken]; if(!item){panel.innerHTML="";panel.classList.remove("open");return;}
+    const controls=(item.keys??[]).map((key)=>tsControlHtml(TS_CONTROL_DEFS.find(x=>x.key===key)!)).join("");
+    panel.innerHTML=`<div class="inspector-copy"><strong>${esc(item.title)}</strong><span>${esc(item.text)}</span></div>${controls?`<div class="inspector-controls">${controls}</div>`:""}`;
+    panel.classList.add("open"); bindTrueSkillControls(panel); return;
+  }
+  if (activeLabMethod === "elo-pl") {
+    if (!activeEloPlFormulaToken) { panel.innerHTML=""; panel.classList.remove("open"); return; }
+    const item=ELO_TOKEN_HELP[activeEloPlFormulaToken]; if(!item){panel.innerHTML="";panel.classList.remove("open");return;}
+    let controls=(item.keys??[]).map((key)=>eloControlHtml(ELO_CONTROL_DEFS.find(x=>x.key===key)!)).join("");
+    if(item.normalization) controls += `<label class="select-row"><span>Нормализация</span><select data-elo-normalization><option value="off" ${eloPlConfig.normalization==="off"?"selected":""}>Off</option><option value="0-1000" ${eloPlConfig.normalization==="0-1000"?"selected":""}>0–1000</option><option value="0-3000" ${eloPlConfig.normalization==="0-3000"?"selected":""}>0–3000</option></select></label>`;
+    panel.innerHTML=`<div class="inspector-copy"><strong>${esc(item.title)}</strong><span>${esc(item.text)}</span></div>${controls?`<div class="inspector-controls">${controls}</div>`:""}`;
+    panel.classList.add("open"); bindEloControls(panel); return;
+  }
 
   if (activeLabMethod === "rr") {
     if (!activeRrFormulaToken) { panel.innerHTML=""; panel.classList.remove("open"); return; }
@@ -1676,8 +1813,28 @@ function exportRrRankingCsv(): void {
   const blob=new Blob(["\\uFEFF"+lines.join("\\n")],{type:"text/csv;charset=utf-8"}); const url=URL.createObjectURL(blob); const a=document.createElement("a");a.href=url;a.download="rr_ranking.csv";a.click();URL.revokeObjectURL(url);
 }
 
+function renderAlternativeLabOutput(kind:"trueskill"|"elo-pl"): void {
+  const cur=kind==="trueskill"?trueSkillCurrent:eloPlCurrent;
+  const ref=kind==="trueskill"?trueSkillReference:eloPlReference;
+  const ranking=document.querySelector<HTMLElement>("#ranking"); const metrics=document.querySelector<HTMLElement>("#metrics"); const leaders=document.querySelector<HTMLElement>("#deltaLeaders"); if(!ranking||!metrics||!leaders)return;
+  if(!cur||!ref){ranking.innerHTML=`<div class="notice error">${esc(labMethodName(kind))} не удалось рассчитать.</div>`;return;}
+  const refMap=new Map(ref.ranking.map((x:any)=>[x.playerId,x]));
+  let rows=(cur.ranking as any[]).map((x:any)=>{const r:any=refMap.get(x.playerId);return {...x,refRank:r?.rank??null,refRating:r?.rating??null,deltaRank:r?r.rank-x.rank:null,deltaRating:r?x.rating-r.rating:null};});
+  const q=rankingSearch.trim().toLocaleLowerCase("ru"); if(q)rows=rows.filter((x:any)=>[x.playerName,x.playerId].some(v=>String(v).toLocaleLowerCase("ru").includes(q)));
+  const changed=rows.filter((x:any)=>x.deltaRank!==null&&x.deltaRank!==0).length; const mean=rows.length?rows.reduce((a:number,x:any)=>a+Math.abs(x.deltaRank??0),0)/rows.length:0;
+  metrics.innerHTML=`<div class="metric-chip"><span>Игроков</span><strong>${cur.ranking.length}</strong></div><div class="metric-chip"><span>Турниров</span><strong>${cur.processedTournamentCount}</strong></div><div class="metric-chip"><span>Изменили место</span><strong>${changed}</strong></div><div class="metric-chip"><span>Среднее |Δ места|</span><strong>${fmt(mean,1)}</strong></div>`;
+  leaders.innerHTML=diagnosticSummaryHtml(`${labMethodName(kind)} / текущая конфигурация`,cur,kind);
+  const count=document.getElementById("rankingVisibleCount"); if(count)count.textContent=`${rows.length} игроков`;
+  if(kind==="trueskill") ranking.innerHTML=`<div class="table-wrap ranking-wrap"><table class="ranking-table"><thead><tr><th>#</th><th>Игрок</th><th>μ−kσ</th><th>μ</th><th>σ</th><th>Турниров</th><th>Default</th><th>Δ rating</th><th>Δ место</th></tr></thead><tbody>${rows.map((x:any)=>`<tr><td>${x.rank}</td><td>${esc(x.playerName)}</td><td class="emph">${fmt(x.rating)}</td><td>${fmt(x.mu,3)}</td><td>${fmt(x.sigma,3)}</td><td>${x.tournamentsCount}</td><td>${x.refRating===null?"—":fmt(x.refRating)}</td><td>${x.deltaRating===null?"—":`${x.deltaRating>=0?"+":""}${fmt(x.deltaRating)}`}</td><td>${x.deltaRank===null?"—":`${x.deltaRank>=0?"+":""}${x.deltaRank}`}</td></tr>`).join("")}</tbody></table></div>`;
+  else ranking.innerHTML=`<div class="table-wrap ranking-wrap"><table class="ranking-table"><thead><tr><th>#</th><th>Игрок</th><th>Display rating</th><th>Raw rating</th><th>Турниров</th><th>Default</th><th>Δ rating</th><th>Δ место</th></tr></thead><tbody>${rows.map((x:any)=>`<tr><td>${x.rank}</td><td>${esc(x.playerName)}</td><td class="emph">${fmt(x.rating)}</td><td>${fmt(x.rawRating)}</td><td>${x.tournamentsCount}</td><td>${x.refRating===null?"—":fmt(x.refRating)}</td><td>${x.deltaRating===null?"—":`${x.deltaRating>=0?"+":""}${fmt(x.deltaRating)}`}</td><td>${x.deltaRank===null?"—":`${x.deltaRank>=0?"+":""}${x.deltaRank}`}</td></tr>`).join("")}</tbody></table></div>`;
+}
+function exportTrueSkillCsv():void{if(!trueSkillCurrent)return;const lines=["rank,player_id,player_name,rating,mu,sigma,tournaments",...trueSkillCurrent.ranking.map(x=>[x.rank,x.playerId,csvCell(x.playerName),x.rating,x.mu,x.sigma,x.tournamentsCount].join(","))];downloadTextFile("trueskill-tournament-ranking.csv",lines.join("\r\n"));}
+function exportEloPlCsv():void{if(!eloPlCurrent)return;const lines=["rank,player_id,player_name,display_rating,raw_rating,tournaments",...eloPlCurrent.ranking.map(x=>[x.rank,x.playerId,csvCell(x.playerName),x.rating,x.rawRating,x.tournamentsCount].join(","))];downloadTextFile("elo-pl-ranking.csv",lines.join("\r\n"));}
+
 function renderOutput(): void {
   if (activeLabMethod === "rr") { renderRrLabOutput(); return; }
+  if (activeLabMethod === "trueskill") { renderAlternativeLabOutput("trueskill"); return; }
+  if (activeLabMethod === "elo-pl") { renderAlternativeLabOutput("elo-pl"); return; }
   if (!current || !reference) {
     const ranking=document.querySelector<HTMLElement>("#ranking"); if(ranking) ranking.innerHTML=`<div class="notice error">MCR не удалось рассчитать для текущего набора/конфигурации.</div>`; return;
   }
@@ -1809,17 +1966,19 @@ function historyOverrides(): TableOverrides {
   return overrides;
 }
 
-function historyMethodOptions(): Array<{ id: string; label: string; method: "mcr"|"rr"; preset?: SavedLabPreset }> {
-  const base = [
-    { id: "mcr-default", label: "MCR-2026 default", method: "mcr" as const },
-    { id: "rr-default", label: "RR default", method: "rr" as const },
+function historyMethodOptions(): Array<{ id: string; label: string; method: LabMethod; preset?: SavedLabPreset }> {
+  const base: Array<{id:string;label:string;method:LabMethod}> = [
+    { id: "mcr-default", label: "MCR-2026 default", method: "mcr" },
+    { id: "rr-default", label: "RR default", method: "rr" },
+    { id: "trueskill-default", label: "TrueSkill Tournament default", method: "trueskill" },
+    { id: "elo-pl-default", label: "Elo-PL default", method: "elo-pl" },
   ];
-  return base.concat(loadPresets().map((preset) => ({
+  return [...base, ...loadPresets().map((preset) => ({
     id: `preset:${preset.id}`,
-    label: `${preset.name} · ${preset.method.toUpperCase()}`,
+    label: `${preset.name} · ${labMethodName(preset.method)}`,
     method: preset.method,
     preset,
-  })));
+  }))];
 }
 
 function historyMethodLabel(id: string): string {
@@ -1881,7 +2040,7 @@ async function buildHistoryForMethodAsync(methodId: string): Promise<UnifiedHist
       if(payload.useVtExperiment) overrides.ageWeights=payload.vtExperiment;
     }
     job = { kind: "mcr-history", config, overrides, initialMode: historyInitialMode };
-  } else {
+  } else if (option.method === "rr") {
     const payload=option.preset?.payload ?? {};
     const config={...defaultRrConfig(),...(payload.config ?? {})};
     const overrides={
@@ -1891,6 +2050,12 @@ async function buildHistoryForMethodAsync(methodId: string): Promise<UnifiedHist
       specialCoefficients: payload.specialCoefficients ?? RR_DEFAULT_SPECIAL_COEFFICIENTS,
     };
     job = { kind: "rr-history", config, overrides };
+  } else if (option.method === "trueskill") {
+    const config={...defaultTrueSkillTournamentConfig(),...(option.preset?.payload?.config ?? {})};
+    job = { kind: "trueskill-history", config };
+  } else {
+    const config={...defaultEloPlConfig(),...(option.preset?.payload?.config ?? {})};
+    job = { kind: "elo-pl-history", config };
   }
 
   const promise = ratingWorkers.run<UnifiedHistorySnapshot[]>(job)
@@ -1903,6 +2068,14 @@ async function buildHistoryForMethodAsync(methodId: string): Promise<UnifiedHist
 function applyHistoryPeriod(rows: UnifiedHistorySnapshot[]): UnifiedHistorySnapshot[] {
   return rows.filter((s)=>(!historyPeriodStart || s.event.tournamentDate>=historyPeriodStart) && (!historyPeriodEnd || s.event.tournamentDate<=historyPeriodEnd))
     .map((s,index)=>({...s,index}));
+}
+
+function alignHistoryPair(a: UnifiedHistorySnapshot[], b: UnifiedHistorySnapshot[]): [UnifiedHistorySnapshot[], UnifiedHistorySnapshot[]] {
+  const mapA=new Map(a.map(x=>[historyEventKey(x.event),x])); const mapB=new Map(b.map(x=>[historyEventKey(x.event),x]));
+  const events=orderedHistoryEvents().filter(e=>(!historyPeriodStart||e.tournamentDate>=historyPeriodStart)&&(!historyPeriodEnd||e.tournamentDate<=historyPeriodEnd));
+  const outA:UnifiedHistorySnapshot[]=[]; const outB:UnifiedHistorySnapshot[]=[]; let lastA:UnifiedHistorySnapshot|null=null,lastB:UnifiedHistorySnapshot|null=null;
+  events.forEach((event,index)=>{const key=historyEventKey(event); if(mapA.has(key))lastA=mapA.get(key)!; if(mapB.has(key))lastB=mapB.get(key)!; outA.push({index,event,ranking:lastA?.ranking??[],processedTournamentCount:lastA?.processedTournamentCount??0}); outB.push({index,event,ranking:lastB?.ranking??[],processedTournamentCount:lastB?.processedTournamentCount??0});});
+  return [outA,outB];
 }
 
 let historyRefreshKey = "";
@@ -1918,8 +2091,7 @@ async function refreshHistorySnapshots(): Promise<void> {
       buildHistoryForMethodAsync(historyMethodB),
     ]);
     if (generation !== historyGeneration || historyRefreshKey !== requestKey) return;
-    historySnapshots=applyHistoryPeriod(a);
-    historyReferenceSnapshots=applyHistoryPeriod(b);
+    [historySnapshots,historyReferenceSnapshots]=alignHistoryPair(a,b);
     historyDirty=false;
     historyRefreshKey="";
     if (!historySnapshots.length) { historySnapshotIndex=0; historyPlayerId=null; }

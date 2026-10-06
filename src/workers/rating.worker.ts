@@ -1,6 +1,8 @@
 import { Mcr2026Engine } from "../engine/legacy";
 import { RrEngine } from "../engine/rr";
 import { simulateMcr2026History } from "../engine/simulation";
+import { TrueSkillTournamentEngine } from "../engine/trueskillTournament";
+import { EloPlEngine } from "../engine/eloPl";
 import type { Mcr2026Config, PlayerInput, ResultInput, TableOverrides, InitialStateMode } from "../engine/types";
 import type { RrConfig, RrOverrides } from "../engine/rr";
 
@@ -115,6 +117,18 @@ self.onmessage = (event: MessageEvent<WorkerMessage>) => {
       }
       case "rr-history":
         value = rrHistory(job.config as RrConfig, job.overrides as RrOverrides);
+        break;
+      case "trueskill":
+        value = new TrueSkillTournamentEngine(job.config).calculate(players, results, job.evaluationDate);
+        break;
+      case "trueskill-history":
+        value = new TrueSkillTournamentEngine(job.config).history(players, results);
+        break;
+      case "elo-pl":
+        value = new EloPlEngine(job.config).calculate(players, results, job.evaluationDate);
+        break;
+      case "elo-pl-history":
+        value = new EloPlEngine(job.config).history(players, results);
         break;
       default:
         throw new Error(`Unknown rating worker job: ${String(job.kind)}`);
