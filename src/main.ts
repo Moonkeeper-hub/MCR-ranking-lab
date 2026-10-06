@@ -1025,7 +1025,7 @@ function renderShell(): void {
 
   app.innerHTML = `
     <div class="app">
-      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.30.1 · TypeScript · MCR-2026 + RR + TrueSkill Tournament + Elo-PL · 2 workers · расчёт выполняется в браузере</div></div>
+      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.30.2 · TypeScript · MCR-2026 + RR + TrueSkill Tournament + Elo-PL · 2 workers · расчёт выполняется в браузере</div></div>
         <div class="topbar-actions"><div class="privacy-pill">CSV остаются на устройстве пользователя</div>
         <div class="support-wrap"><button id="supportButton" class="support-button" type="button">Donate / Support</button>
         <div id="supportPopover" class="support-popover" hidden><strong>Поддержать проект</strong><span>Перевод по номеру телефона на Сбербанк</span><div class="support-number-row"><code>+7 967 087 1525</code><button id="copySupportNumber" type="button">Копировать</button></div><span id="supportCopyStatus" class="micro"></span></div></div></div>

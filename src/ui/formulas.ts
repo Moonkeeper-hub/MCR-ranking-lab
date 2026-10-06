@@ -135,9 +135,7 @@ export function renderTrueSkillTournamentMath(config: TrueSkillTournamentConfig)
   const init=render(String.raw`${hotspot("\\mu_0","tsMu")}=${hotspot(mu,"tsMuCoef")},\quad ${hotspot("\\sigma_0","tsSigma")}=${hotspot(sigma,"tsSigmaCoef")},\quad ${hotspot("\\beta","tsBeta")}=${hotspot(beta,"tsBetaCoef")}`);
   const decay=render(String.raw`${hotspot("\\sigma_{prior}","tsDecay")}=\sqrt{${hotspot("\\sigma^2","tsSigma")}+\left(${hotspot(tau,"tsTauCoef")}\sqrt{${hotspot("\\Delta t_{years}","tsTime")}}\right)^2}`);
   const tw=render(String.raw`${hotspot("w_T","tsTournamentWeight")}=1+\frac{${hotspot(n(config.tournamentCorrectionCoef),"tsTournamentCoef")}}{3}\cdot\frac{\frac{${hotspot(n(config.participantsCoef),"tsParticipantsCoef")}}{3}${hotspot("s_N","tsSizeSignal")}+\frac{${hotspot(n(config.sessionsCoef),"tsSessionsCoef")}}{3}${hotspot("s_H","tsSessionSignal")}}{2}`);
-  const upd=render(String.raw`${hotspot("\\mu'","tsUpdate")}=${hotspot("\\mu","tsMu")}+${hotspot("w_T","tsTournamentWeight")}\left(${hotspot("\\mu_{TS}","tsRawUpdate")}-${hotspot("\\mu","tsMu")}
-ight),\quad ${hotspot("\\sigma'","tsUpdate")}=${hotspot("\\sigma","tsSigma")}+${hotspot("w_T","tsTournamentWeight")}\left(${hotspot("\\sigma_{TS}","tsRawUpdate")}-${hotspot("\\sigma","tsSigma")}
-ight)`);
+  const upd=render(String.raw`${hotspot("\\mu'","tsUpdate")}=${hotspot("\\mu","tsMu")}+${hotspot("w_T","tsTournamentWeight")}\left(${hotspot("\\mu_{TS}","tsRawUpdate")}-${hotspot("\\mu","tsMu")}\right),\quad ${hotspot("\\sigma'","tsUpdate")}=${hotspot("\\sigma","tsSigma")}+${hotspot("w_T","tsTournamentWeight")}\left(${hotspot("\\sigma_{TS}","tsRawUpdate")}-${hotspot("\\sigma","tsSigma")}\right)`);
   return `<div class="math-formula-stack"><div class="math-line math-line-primary">${main}</div><div class="math-line math-line-secondary">${init}</div><div class="math-line">${decay}</div><div class="math-line math-line-secondary">${tw}</div><div class="math-line">${upd}</div></div>`;
 }
 
