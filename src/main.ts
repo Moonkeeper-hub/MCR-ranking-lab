@@ -2,13 +2,12 @@
 import "./styles.css";
 import "katex/dist/katex.min.css";
 import { renderMcr2026Math, renderRrMath } from "./ui/formulas";
-import { Mcr2026Engine, defaultMcr2026Config } from "./engine/legacy";
+import { defaultMcr2026Config } from "./engine/legacy";
 import {
-  RrEngine, defaultRrConfig, RR_DEFAULT_PLAYER_BANDS, RR_DEFAULT_SESSION_BANDS,
+  defaultRrConfig, RR_DEFAULT_PLAYER_BANDS, RR_DEFAULT_SESSION_BANDS,
   RR_DEFAULT_TYPE_MULTIPLIERS, RR_DEFAULT_SPECIAL_COEFFICIENTS,
 } from "./engine/rr";
 import type { RrCalculationResult, RrConfig, RrRangeBand, RrSpecialCoefficient } from "./engine/rr";
-import { simulateMcr2026History } from "./engine/simulation";
 import {
   KT_PARTICIPANTS,
   MCR2026_AGE_WEIGHTS,
@@ -26,6 +25,8 @@ import type {
 } from "./engine/types";
 import { loadCsvPair, playersFromCsv, resultsFromCsv } from "./data/csv";
 import { calculateRankingDistanceMetric, type RankingDistanceMetric } from "./analysis/rankingDistance";
+import { LruCache, stableSerialize } from "./performanceCache";
+import { RatingWorkerPool } from "./workerPool";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 
@@ -96,8 +97,7 @@ interface UnifiedHistorySnapshot {
     isStatusTournament: boolean;
   };
   ranking: UnifiedHistoryRow[];
-  mcrResult?: CalculationResult;
-  rrResult?: RrCalculationResult;
+  processedTournamentCount?: number;
 }
 let historyMethodA: HistoryMethodId = "mcr-default";
 let historyMethodB: HistoryMethodId = "rr-default";
@@ -118,7 +118,92 @@ let historyTableSortDir: "asc" | "desc" = "asc";
 
 let distanceTopN = 100;
 let distanceStep = 5;
-const distanceMetricCache = new Map<string, RankingDistanceMetric>();
+let datasetRevision = 0;
+const mcrCalculationCache = new LruCache<CalculationResult>(24);
+const rrCalculationCache = new LruCache<RrCalculationResult>(24);
+const historyMethodCache = new LruCache<UnifiedHistorySnapshot[]>(12);
+const distanceMetricCache = new LruCache<RankingDistanceMetric>(24);
+const ratingWorkers = new RatingWorkerPool();
+const mcrInFlight = new Map<string, Promise<CalculationResult>>();
+const rrInFlight = new Map<string, Promise<RrCalculationResult>>();
+const historyInFlight = new Map<string, Promise<UnifiedHistorySnapshot[]>>();
+let recalcTimer: number | undefined;
+let recalcGeneration = 0;
+let historyGeneration = 0;
+const RECALC_DEBOUNCE_MS = 350;
+let orderedEventsCacheRevision = -1;
+let orderedEventsCache: UnifiedHistorySnapshot["event"][] = [];
+let eventRowsCache = new Map<string, ResultInput[]>();
+
+function clearDatasetCaches(): void {
+  mcrCalculationCache.clear();
+  rrCalculationCache.clear();
+  historyMethodCache.clear();
+  distanceMetricCache.clear();
+  orderedEventsCacheRevision = -1;
+  orderedEventsCache = [];
+  eventRowsCache = new Map();
+  mcrInFlight.clear();
+  rrInFlight.clear();
+  historyInFlight.clear();
+}
+
+function markDatasetChanged(): void {
+  datasetRevision += 1;
+  clearDatasetCaches();
+  historyDirty = true;
+  ratingWorkers.setDataset(players, results, datasetRevision);
+}
+
+function mcrCalculationKey(config: Mcr2026Config, overrides: TableOverrides, evaluationDate: string): string {
+  return `mcr|${datasetRevision}|${evaluationDate}|${stableSerialize(config)}|${stableSerialize(overrides)}`;
+}
+
+function rrCalculationKey(config: RrConfig, overrides: { playerBands?: RrRangeBand[]; sessionBands?: RrRangeBand[]; tournamentTypeMultipliers?: Record<string, number>; specialCoefficients?: RrSpecialCoefficient[] }, evaluationDate: string): string {
+  return `rr|${datasetRevision}|${evaluationDate}|${stableSerialize(config)}|${stableSerialize(overrides)}`;
+}
+
+function getMcrCached(config: Mcr2026Config, overrides: TableOverrides, evaluationDate: string): CalculationResult | undefined {
+  return mcrCalculationCache.get(mcrCalculationKey(config, overrides, evaluationDate));
+}
+
+function getRrCached(
+  config: RrConfig,
+  overrides: { playerBands?: RrRangeBand[]; sessionBands?: RrRangeBand[]; tournamentTypeMultipliers?: Record<string, number>; specialCoefficients?: RrSpecialCoefficient[] },
+  evaluationDate: string,
+): RrCalculationResult | undefined {
+  return rrCalculationCache.get(rrCalculationKey(config, overrides, evaluationDate));
+}
+
+async function calculateMcrCachedAsync(config: Mcr2026Config, overrides: TableOverrides, evaluationDate: string): Promise<CalculationResult> {
+  const key = mcrCalculationKey(config, overrides, evaluationDate);
+  const cached = mcrCalculationCache.get(key);
+  if (cached) return cached;
+  const running = mcrInFlight.get(key);
+  if (running) return running;
+  const promise = ratingWorkers.run<CalculationResult>({ kind: "mcr", config, overrides, evaluationDate })
+    .then((result) => { mcrCalculationCache.set(key, result); return result; })
+    .finally(() => mcrInFlight.delete(key));
+  mcrInFlight.set(key, promise);
+  return promise;
+}
+
+async function calculateRrCachedAsync(
+  config: RrConfig,
+  overrides: { playerBands?: RrRangeBand[]; sessionBands?: RrRangeBand[]; tournamentTypeMultipliers?: Record<string, number>; specialCoefficients?: RrSpecialCoefficient[] },
+  evaluationDate: string,
+): Promise<RrCalculationResult> {
+  const key = rrCalculationKey(config, overrides, evaluationDate);
+  const cached = rrCalculationCache.get(key);
+  if (cached) return cached;
+  const running = rrInFlight.get(key);
+  if (running) return running;
+  const promise = ratingWorkers.run<RrCalculationResult>({ kind: "rr", config, overrides, evaluationDate })
+    .then((result) => { rrCalculationCache.set(key, result); return result; })
+    .finally(() => rrInFlight.delete(key));
+  rrInFlight.set(key, promise);
+  return promise;
+}
 
 
 function esc(v: unknown): string {
@@ -200,55 +285,72 @@ function applyPreset(preset: SavedLabPreset): void {
   }
 }
 
-function recalc(): void {
-  distanceMetricCache.clear();
+function scheduleRecalc(delay = RECALC_DEBOUNCE_MS): void {
+  // Invalidate an already running calculation as soon as the user changes a
+  // control; its eventual result may populate cache, but must not repaint UI.
+  recalcGeneration += 1;
+  if (recalcTimer !== undefined) window.clearTimeout(recalcTimer);
+  setStatus(`Параметры изменены · пересчёт через ${delay} мс…`, true);
+  recalcTimer = window.setTimeout(() => {
+    recalcTimer = undefined;
+    void recalc();
+  }, delay);
+}
+
+async function recalc(): Promise<void> {
+  if (recalcTimer !== undefined) {
+    window.clearTimeout(recalcTimer);
+    recalcTimer = undefined;
+  }
+  const generation = ++recalcGeneration;
   const evaluationDate = document.querySelector<HTMLInputElement>("#evaluationDate")?.value || evaluationDateState;
   evaluationDateState = evaluationDate;
   const overrides: TableOverrides = {};
   if (useKtExperiment) overrides.ktParticipants = ktExperiment;
   if (useVtExperiment) overrides.ageWeights = vtExperiment;
+  const rrOverrides = {
+    playerBands: rrPlayerBands,
+    sessionBands: rrSessionBands,
+    tournamentTypeMultipliers: rrTypeMultipliers,
+    specialCoefficients: rrSpecialCoefficients,
+  };
+  const rrDefaultOverrides = {
+    playerBands: RR_DEFAULT_PLAYER_BANDS,
+    sessionBands: RR_DEFAULT_SESSION_BANDS,
+    tournamentTypeMultipliers: RR_DEFAULT_TYPE_MULTIPLIERS,
+    specialCoefficients: RR_DEFAULT_SPECIAL_COEFFICIENTS,
+  };
 
   const errors: string[] = [];
+  setStatus(`Срез ${evaluationDate}: расчёт в двух очередях…`, true);
 
-  try {
-    current = new Mcr2026Engine(currentConfig, overrides).calculate(players, results, evaluationDate);
-  } catch (error) {
-    current = null;
-    errors.push(`MCR lab: ${error instanceof Error ? error.message : String(error)}`);
+  const jobs = await Promise.allSettled([
+    calculateMcrCachedAsync(currentConfig, overrides, evaluationDate),
+    calculateMcrCachedAsync(defaultMcr2026Config(), {}, evaluationDate),
+    calculateRrCachedAsync(rrConfig, rrOverrides, evaluationDate),
+    calculateRrCachedAsync(defaultRrConfig(), rrDefaultOverrides, evaluationDate),
+  ]);
+  if (generation !== recalcGeneration) return;
+
+  const assign = <T,>(item: PromiseSettledResult<T>, label: string): T | null => {
+    if (item.status === "fulfilled") return item.value;
+    errors.push(`${label}: ${item.reason instanceof Error ? item.reason.message : String(item.reason)}`);
+    return null;
+  };
+  current = assign(jobs[0] as PromiseSettledResult<CalculationResult>, "MCR lab");
+  reference = assign(jobs[1] as PromiseSettledResult<CalculationResult>, "MCR-2026 default");
+  rrCurrent = assign(jobs[2] as PromiseSettledResult<RrCalculationResult>, "RR lab");
+  rrReference = assign(jobs[3] as PromiseSettledResult<RrCalculationResult>, "RR default");
+
+  // Selected comparison preset is warmed in the same two-worker queues so the
+  // comparison renderer never has to start a cold calculation on the UI thread.
+  const selectedPreset = comparisonPresetId ? loadPresets().find((p) => p.id === comparisonPresetId) : undefined;
+  if (selectedPreset) {
+    try { await warmSavedPreset(selectedPreset, evaluationDate); }
+    catch (error) { errors.push(`Preset ${selectedPreset.name}: ${error instanceof Error ? error.message : String(error)}`); }
+    if (generation !== recalcGeneration) return;
   }
 
-  try {
-    reference = new Mcr2026Engine(defaultMcr2026Config()).calculate(players, results, evaluationDate);
-  } catch (error) {
-    reference = null;
-    errors.push(`MCR-2026 default: ${error instanceof Error ? error.message : String(error)}`);
-  }
-
-  try {
-    rrCurrent = new RrEngine(rrConfig, {
-      playerBands: rrPlayerBands,
-      sessionBands: rrSessionBands,
-      tournamentTypeMultipliers: rrTypeMultipliers,
-      specialCoefficients: rrSpecialCoefficients,
-    }).calculate(players, results, evaluationDate);
-  } catch (error) {
-    rrCurrent = null;
-    errors.push(`RR lab: ${error instanceof Error ? error.message : String(error)}`);
-  }
-
-  try {
-    rrReference = new RrEngine(defaultRrConfig(), {
-      playerBands: RR_DEFAULT_PLAYER_BANDS,
-      sessionBands: RR_DEFAULT_SESSION_BANDS,
-      tournamentTypeMultipliers: RR_DEFAULT_TYPE_MULTIPLIERS,
-      specialCoefficients: RR_DEFAULT_SPECIAL_COEFFICIENTS,
-    }).calculate(players, results, evaluationDate);
-  } catch (error) {
-    rrReference = null;
-    errors.push(`RR default: ${error instanceof Error ? error.message : String(error)}`);
-  }
-
-  historyDirty = true;
   syncAllControlValues();
   renderFormulaMath();
   renderOutput();
@@ -339,7 +441,7 @@ function bindNumericControls(root: ParentNode = document): void {
       if (key === "t5Weight") currentConfig.euWeight = Number((1 - value).toFixed(2));
 
       syncAllControlValues();
-      recalc();
+      scheduleRecalc();
     });
   });
 }
@@ -438,8 +540,19 @@ function bindRrControls(): void {
       (rrConfig[key] as number) = value;
       if (key === "firstPartWeight") rrConfig.secondPartWeight = Number((1 - value).toFixed(2));
       if (key === "secondPartWeight") rrConfig.firstPartWeight = Number((1 - value).toFixed(2));
-      renderRrControls();
-      recalc();
+      const valueEl = input.closest(".control-row")?.querySelector<HTMLElement>(".control-value");
+      if (valueEl) valueEl.textContent = value.toFixed(rrDef(key).digits ?? 2);
+      document.querySelectorAll<HTMLInputElement>("[data-rr-config-key]").forEach((other) => {
+        const otherKey = other.dataset.rrConfigKey as RrNumericKey;
+        if (otherKey === key) return;
+        if ((key === "firstPartWeight" && otherKey === "secondPartWeight") || (key === "secondPartWeight" && otherKey === "firstPartWeight")) {
+          const otherValue = Number(rrConfig[otherKey]);
+          other.value = String(otherValue);
+          const otherValueEl = other.closest(".control-row")?.querySelector<HTMLElement>(".control-value");
+          if (otherValueEl) otherValueEl.textContent = otherValue.toFixed(rrDef(otherKey).digits ?? 2);
+        }
+      });
+      scheduleRecalc();
     };
   });
   document.querySelectorAll<HTMLInputElement>("[data-rr-band-max]").forEach((input) => {
@@ -472,28 +585,39 @@ function bindRrControls(): void {
   });
 }
 
-function calculateSavedPreset(preset: SavedLabPreset, evaluationDate: string): { name: string; method: string; ranking: Array<{playerId:string; playerName:string; rank:number; rating:number}> } | null {
-  try {
-    if (preset.method === "mcr") {
-      const payload = preset.payload ?? {};
-      const overrides: TableOverrides = {};
-      if (payload.useKtExperiment) overrides.ktParticipants = payload.ktExperiment;
-      if (payload.useVtExperiment) overrides.ageWeights = payload.vtExperiment;
-      const result = new Mcr2026Engine({ ...defaultMcr2026Config(), ...(payload.config ?? {}) }, overrides)
-        .calculate(players, results, evaluationDate);
-      return { name: preset.name, method: "MCR", ranking: result.ranking.map((x) => ({ playerId:x.playerId, playerName:x.playerName, rank:x.rank, rating:x.rating })) };
-    }
-    const payload = preset.payload ?? {};
-    const result = new RrEngine({ ...defaultRrConfig(), ...(payload.config ?? {}) }, {
-      playerBands: payload.playerBands ?? RR_DEFAULT_PLAYER_BANDS,
-      sessionBands: payload.sessionBands ?? RR_DEFAULT_SESSION_BANDS,
-      tournamentTypeMultipliers: payload.typeMultipliers ?? RR_DEFAULT_TYPE_MULTIPLIERS,
-      specialCoefficients: payload.specialCoefficients ?? RR_DEFAULT_SPECIAL_COEFFICIENTS,
-    }).calculate(players, results, evaluationDate);
-    return { name: preset.name, method: "RR", ranking: result.ranking.map((x) => ({ playerId:x.playerId, playerName:x.playerName, rank:x.rank, rating:x.rating })) };
-  } catch {
-    return null;
+async function warmSavedPreset(preset: SavedLabPreset, evaluationDate: string): Promise<void> {
+  const payload = preset.payload ?? {};
+  if (preset.method === "mcr") {
+    const overrides: TableOverrides = {};
+    if (payload.useKtExperiment) overrides.ktParticipants = payload.ktExperiment;
+    if (payload.useVtExperiment) overrides.ageWeights = payload.vtExperiment;
+    await calculateMcrCachedAsync({ ...defaultMcr2026Config(), ...(payload.config ?? {}) }, overrides, evaluationDate);
+    return;
   }
+  await calculateRrCachedAsync({ ...defaultRrConfig(), ...(payload.config ?? {}) }, {
+    playerBands: payload.playerBands ?? RR_DEFAULT_PLAYER_BANDS,
+    sessionBands: payload.sessionBands ?? RR_DEFAULT_SESSION_BANDS,
+    tournamentTypeMultipliers: payload.typeMultipliers ?? RR_DEFAULT_TYPE_MULTIPLIERS,
+    specialCoefficients: payload.specialCoefficients ?? RR_DEFAULT_SPECIAL_COEFFICIENTS,
+  }, evaluationDate);
+}
+
+function calculateSavedPreset(preset: SavedLabPreset, evaluationDate: string): { name: string; method: string; ranking: Array<{playerId:string; playerName:string; rank:number; rating:number}> } | null {
+  const payload = preset.payload ?? {};
+  if (preset.method === "mcr") {
+    const overrides: TableOverrides = {};
+    if (payload.useKtExperiment) overrides.ktParticipants = payload.ktExperiment;
+    if (payload.useVtExperiment) overrides.ageWeights = payload.vtExperiment;
+    const result = getMcrCached({ ...defaultMcr2026Config(), ...(payload.config ?? {}) }, overrides, evaluationDate);
+    return result ? { name: preset.name, method: "MCR", ranking: result.ranking.map((x) => ({ playerId:x.playerId, playerName:x.playerName, rank:x.rank, rating:x.rating })) } : null;
+  }
+  const result = getRrCached({ ...defaultRrConfig(), ...(payload.config ?? {}) }, {
+    playerBands: payload.playerBands ?? RR_DEFAULT_PLAYER_BANDS,
+    sessionBands: payload.sessionBands ?? RR_DEFAULT_SESSION_BANDS,
+    tournamentTypeMultipliers: payload.typeMultipliers ?? RR_DEFAULT_TYPE_MULTIPLIERS,
+    specialCoefficients: payload.specialCoefficients ?? RR_DEFAULT_SPECIAL_COEFFICIENTS,
+  }, evaluationDate);
+  return result ? { name: preset.name, method: "RR", ranking: result.ranking.map((x) => ({ playerId:x.playerId, playerName:x.playerName, rank:x.rank, rating:x.rating })) } : null;
 }
 
 function diagnosticSummaryHtml(title: string, result: { diagnostics?: any[]; isComplete?: boolean; processedTournamentCount?: number; skippedTournamentCount?: number } | null, kind: "mcr" | "rr"): string {
@@ -542,7 +666,7 @@ function renderComparison(): void {
     presetSelect.innerHTML = `<option value="">Без пользовательского пресета</option>` + presets.map((p) =>
       `<option value="${esc(p.id)}" ${p.id === existing ? "selected" : ""}>${esc(p.name)} · ${p.method.toUpperCase()}</option>`
     ).join("");
-    presetSelect.onchange = () => { comparisonPresetId = presetSelect.value; renderComparison(); };
+    presetSelect.onchange = () => { comparisonPresetId = presetSelect.value; void recalc(); };
   }
 
   const evaluationDate = document.querySelector<HTMLInputElement>("#evaluationDate")?.value || evaluationDateState;
@@ -630,15 +754,17 @@ function distanceHorizonMonths(methodId: string): number {
 }
 
 function distanceMetricForMethod(methodId: string): RankingDistanceMetric {
-  const key = [methodId, evaluationDateState, historyInitialMode, distanceTopN, distanceStep].join("|");
+  const key = [datasetRevision, historyMethodCacheKey(methodId), evaluationDateState, distanceTopN, distanceStep].join("|");
   const cached = distanceMetricCache.get(key);
   if (cached) return cached;
-  const history = buildHistoryForMethod(methodId).filter((snapshot) => snapshot.event.tournamentDate <= evaluationDateState);
+  const cachedHistory = getHistoryCached(methodId);
+  if (!cachedHistory) throw new Error("Расчёт истории ещё выполняется");
+  const history = cachedHistory.filter((snapshot) => snapshot.event.tournamentDate <= evaluationDateState);
   const metric = calculateRankingDistanceMetric({
     snapshots: history.map((snapshot) => ({
       event: snapshot.event,
       ranking: snapshot.ranking.map((row) => ({ playerId: row.playerId, rank: row.rank })),
-      processedTournamentCount: snapshot.mcrResult?.processedTournamentCount ?? snapshot.rrResult?.processedTournamentCount,
+      processedTournamentCount: snapshot.processedTournamentCount,
     })),
     results: results.map((row) => ({
       tournamentId: row.tournament_id,
@@ -714,6 +840,21 @@ function distanceCsv(methodName: string, metric: RankingDistanceMetric): string 
   return lines.join("\r\n");
 }
 
+let distanceHistoryRequestKey = "";
+
+function ensureDistanceHistories(methodIds: string[]): void {
+  const missing = methodIds.filter((id) => !getHistoryCached(id));
+  if (!missing.length) return;
+  const key = `${datasetRevision}|${historyInitialMode}|${missing.sort().join(",")}`;
+  if (distanceHistoryRequestKey === key) return;
+  distanceHistoryRequestKey = key;
+  void Promise.allSettled(missing.map((id) => buildHistoryForMethodAsync(id))).then(() => {
+    if (distanceHistoryRequestKey !== key) return;
+    distanceHistoryRequestKey = "";
+    renderDistanceMetrics();
+  });
+}
+
 function renderDistanceMetrics(): void {
   const host = document.querySelector<HTMLDivElement>("#distanceMetricMethods");
   if (!host) return;
@@ -724,6 +865,7 @@ function renderDistanceMetrics(): void {
     host.innerHTML = `<div class="notice">Загрузите dataset, чтобы рассчитать метрику дистанции.</div>`;
     return;
   }
+  ensureDistanceHistories(uniqueIds);
 
   const calculated = uniqueIds.map((methodId) => {
     const name = historyMethodLabel(methodId);
@@ -813,7 +955,7 @@ function renderShell(): void {
 
   app.innerHTML = `
     <div class="app">
-      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.29 · TypeScript · MCR-2026 + RR · Comparison · расчёт выполняется в браузере</div></div>
+      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.29.2 · TypeScript · MCR-2026 + RR · Comparison · 2 workers + debounce · расчёт выполняется в браузере</div></div>
         <div class="topbar-actions"><div class="privacy-pill">CSV остаются на устройстве пользователя</div>
         <div class="support-wrap"><button id="supportButton" class="support-button" type="button">Donate / Support</button>
         <div id="supportPopover" class="support-popover" hidden><strong>Поддержать проект</strong><span>Перевод по номеру телефона на Сбербанк</span><div class="support-number-row"><code>+7 967 087 1525</code><button id="copySupportNumber" type="button">Копировать</button></div><span id="supportCopyStatus" class="micro"></span></div></div></div>
@@ -1684,8 +1826,14 @@ function historyMethodLabel(id: string): string {
   return historyMethodOptions().find((x) => x.id === id)?.label ?? id;
 }
 
+function historyEventKey(event: { tournamentDate: string; tournamentOrder: number; tournamentId: string }): string {
+  return `${event.tournamentDate}\u0000${event.tournamentOrder}\u0000${event.tournamentId}`;
+}
+
 function orderedHistoryEvents() {
+  if (orderedEventsCacheRevision === datasetRevision) return orderedEventsCache;
   const map = new Map<string, UnifiedHistorySnapshot["event"]>();
+  const rowMap = new Map<string, ResultInput[]>();
   for (const row of results) {
     const event = {
       tournamentId: String(row.tournament_id), tournamentName: String(row.tournament_name),
@@ -1693,51 +1841,63 @@ function orderedHistoryEvents() {
       participants: Number(row.participants), sessions: Number(row.sessions),
       isStatusTournament: Boolean(row.is_status_tournament),
     };
-    const key = `${event.tournamentDate}\u0000${event.tournamentOrder}\u0000${event.tournamentId}`;
-    if (!map.has(key)) map.set(key,event);
+    const key = historyEventKey(event);
+    if (!map.has(key)) map.set(key, event);
+    const bucket = rowMap.get(key);
+    if (bucket) bucket.push(row); else rowMap.set(key, [row]);
   }
-  return [...map.values()].sort((a,b)=>a.tournamentDate.localeCompare(b.tournamentDate)||a.tournamentOrder-b.tournamentOrder||a.tournamentId.localeCompare(b.tournamentId));
+  orderedEventsCache = [...map.values()].sort((a,b)=>a.tournamentDate.localeCompare(b.tournamentDate)||a.tournamentOrder-b.tournamentOrder||a.tournamentId.localeCompare(b.tournamentId));
+  eventRowsCache = rowMap;
+  orderedEventsCacheRevision = datasetRevision;
+  return orderedEventsCache;
 }
 
-function toUnifiedMcr(snapshots: RatingSnapshot[]): UnifiedHistorySnapshot[] {
-  return snapshots.map((s) => ({
-    index: s.index, event: s.event,
-    ranking: s.result.ranking.map((r)=>({rank:r.rank,playerId:r.playerId,playerName:r.playerName,rating:r.rating,tournamentsCount:r.tournamentsCount,level:r.level,currentEu:r.currentEu,t5:r.t5})),
-    mcrResult: s.result,
-  }));
-}
-
-function buildHistoryForMethod(methodId: string): UnifiedHistorySnapshot[] {
+function historyMethodCacheKey(methodId: string): string {
   const option = historyMethodOptions().find((x)=>x.id===methodId) ?? historyMethodOptions()[0];
+  const presetStamp = option.preset ? `${option.preset.id}|${option.preset.savedAt}|${stableSerialize(option.preset.payload)}` : "default";
+  return `history|${datasetRevision}|${historyInitialMode}|${option.method}|${methodId}|${presetStamp}`;
+}
+
+function getHistoryCached(methodId: string): UnifiedHistorySnapshot[] | undefined {
+  return historyMethodCache.get(historyMethodCacheKey(methodId));
+}
+
+async function buildHistoryForMethodAsync(methodId: string): Promise<UnifiedHistorySnapshot[]> {
+  const cacheKey = historyMethodCacheKey(methodId);
+  const cached = historyMethodCache.get(cacheKey);
+  if (cached) return cached;
+  const running = historyInFlight.get(cacheKey);
+  if (running) return running;
+
+  const option = historyMethodOptions().find((x)=>x.id===methodId) ?? historyMethodOptions()[0];
+  let job: any;
   if (option.method === "mcr") {
     let config = defaultMcr2026Config();
-    let overrides: TableOverrides = {};
+    const overrides: TableOverrides = {};
     if (option.preset) {
       const payload=option.preset.payload ?? {};
       config={...config,...(payload.config ?? {})};
       if(payload.useKtExperiment) overrides.ktParticipants=payload.ktExperiment;
       if(payload.useVtExperiment) overrides.ageWeights=payload.vtExperiment;
     }
-    return toUnifiedMcr(simulateMcr2026History(players,results,config,overrides,historyInitialMode));
+    job = { kind: "mcr-history", config, overrides, initialMode: historyInitialMode };
+  } else {
+    const payload=option.preset?.payload ?? {};
+    const config={...defaultRrConfig(),...(payload.config ?? {})};
+    const overrides={
+      playerBands: payload.playerBands ?? RR_DEFAULT_PLAYER_BANDS,
+      sessionBands: payload.sessionBands ?? RR_DEFAULT_SESSION_BANDS,
+      tournamentTypeMultipliers: payload.typeMultipliers ?? RR_DEFAULT_TYPE_MULTIPLIERS,
+      specialCoefficients: payload.specialCoefficients ?? RR_DEFAULT_SPECIAL_COEFFICIENTS,
+    };
+    job = { kind: "rr-history", config, overrides };
   }
 
-  const payload=option.preset?.payload ?? {};
-  const config={...defaultRrConfig(),...(payload.config ?? {})};
-  const overrides={
-    playerBands: payload.playerBands ?? RR_DEFAULT_PLAYER_BANDS,
-    sessionBands: payload.sessionBands ?? RR_DEFAULT_SESSION_BANDS,
-    tournamentTypeMultipliers: payload.typeMultipliers ?? RR_DEFAULT_TYPE_MULTIPLIERS,
-    specialCoefficients: payload.specialCoefficients ?? RR_DEFAULT_SPECIAL_COEFFICIENTS,
-  };
-  const events=orderedHistoryEvents();
-  const prefix: ResultInput[]=[];
-  const out: UnifiedHistorySnapshot[]=[];
-  events.forEach((event,index)=>{
-    prefix.push(...results.filter((row)=>String(row.tournament_id)===event.tournamentId && String(row.tournament_date)===event.tournamentDate && Number(row.tournament_order ?? 0)===event.tournamentOrder));
-    const result=new RrEngine(config,overrides).calculate(players,prefix,event.tournamentDate);
-    out.push({index,event,ranking:result.ranking.map((r)=>({rank:r.rank,playerId:r.playerId,playerName:r.playerName,rating:r.rating,tournamentsCount:r.tournamentsCount})),rrResult:result});
-  });
-  return out;
+  const promise = ratingWorkers.run<UnifiedHistorySnapshot[]>(job)
+    .then((built) => { historyMethodCache.set(cacheKey, built); return built; })
+    .finally(() => historyInFlight.delete(cacheKey));
+  historyInFlight.set(cacheKey, promise);
+  return promise;
 }
 
 function applyHistoryPeriod(rows: UnifiedHistorySnapshot[]): UnifiedHistorySnapshot[] {
@@ -1745,15 +1905,37 @@ function applyHistoryPeriod(rows: UnifiedHistorySnapshot[]): UnifiedHistorySnaps
     .map((s,index)=>({...s,index}));
 }
 
-function ensureHistorySnapshots(): void {
-  if (!historyDirty) return;
-  historySnapshots=applyHistoryPeriod(buildHistoryForMethod(historyMethodA));
-  historyReferenceSnapshots=applyHistoryPeriod(buildHistoryForMethod(historyMethodB));
-  historyDirty=false;
-  if (!historySnapshots.length) { historySnapshotIndex=0; historyPlayerId=null; return; }
-  historySnapshotIndex=Math.min(historySnapshotIndex,historySnapshots.length-1);
-  const latest=historySnapshots[historySnapshots.length-1];
-  if(!historyPlayerId || !latest.ranking.some((r)=>r.playerId===historyPlayerId)) historyPlayerId=latest.ranking[0]?.playerId ?? null;
+let historyRefreshKey = "";
+
+async function refreshHistorySnapshots(): Promise<void> {
+  const requestKey = [datasetRevision, historyInitialMode, historyMethodA, historyMethodB, historyPeriodStart, historyPeriodEnd].join("|");
+  if (historyRefreshKey === requestKey) return;
+  historyRefreshKey = requestKey;
+  const generation = ++historyGeneration;
+  try {
+    const [a, b] = await Promise.all([
+      buildHistoryForMethodAsync(historyMethodA),
+      buildHistoryForMethodAsync(historyMethodB),
+    ]);
+    if (generation !== historyGeneration || historyRefreshKey !== requestKey) return;
+    historySnapshots=applyHistoryPeriod(a);
+    historyReferenceSnapshots=applyHistoryPeriod(b);
+    historyDirty=false;
+    historyRefreshKey="";
+    if (!historySnapshots.length) { historySnapshotIndex=0; historyPlayerId=null; }
+    else {
+      historySnapshotIndex=Math.min(historySnapshotIndex,historySnapshots.length-1);
+      const latest=historySnapshots[historySnapshots.length-1];
+      if(!historyPlayerId || !latest.ranking.some((r)=>r.playerId===historyPlayerId)) historyPlayerId=latest.ranking[0]?.playerId ?? null;
+    }
+    renderHistoryWorkspace();
+    renderDistanceMetrics();
+  } catch (error) {
+    if (generation !== historyGeneration) return;
+    historyRefreshKey="";
+    const summary=document.getElementById("historySummary");
+    if(summary) summary.innerHTML=`<div class="notice error">${esc(error instanceof Error ? error.message : String(error))}</div>`;
+  }
 }
 
 function renderHistorySettings(): void {
@@ -1776,8 +1958,15 @@ function renderHistorySettings(): void {
 }
 
 function renderHistoryWorkspace(): void {
-  ensureHistorySnapshots();
   const summary=byId("historySummary"), slider=byId<HTMLInputElement>("historySlider"), ticks=byId("historyTicks"), select=byId<HTMLSelectElement>("historyPlayerSelect");
+  if (historyDirty) {
+    summary.innerHTML=`<div class="notice">Расчёт истории в фоновых очередях…</div>`;
+    ticks.innerHTML=""; select.innerHTML=""; byId("historyPlayerChart").innerHTML=""; byId("historySnapshotPanel").innerHTML="";
+    slider.min="0"; slider.max="0"; slider.value="0";
+    renderHistorySettings();
+    void refreshHistorySnapshots();
+    return;
+  }
   if(!historySnapshots.length){summary.innerHTML=`<div class="notice">Нет турниров для выбранного периода.</div>`;ticks.innerHTML="";select.innerHTML="";byId("historyPlayerChart").innerHTML="";byId("historySnapshotPanel").innerHTML="";slider.min="0";slider.max="0";slider.value="0";renderHistorySettings();return;}
   const first=historySnapshots[0].event,last=historySnapshots[historySnapshots.length-1].event;
   summary.innerHTML=`<div class="history-stat"><span>Турниров</span><strong>${historySnapshots.length}</strong></div>
@@ -1847,6 +2036,7 @@ async function loadFiles(): Promise<void> {
     const [pt, rt] = await Promise.all([pf.text(), rf.text()]);
     players = playersFromCsv(pt);
     results = resultsFromCsv(rt);
+    markDatasetChanged();
     dataLabel = `${pf.name} + ${rf.name}`;
     byId("dataLabel").textContent = dataLabel;
     recalc();
@@ -1864,6 +2054,7 @@ async function loadBuiltin(): Promise<void> {
     );
     players = data.players;
     results = data.results;
+    markDatasetChanged();
     dataLabel = "встроенный demo dataset";
     byId("dataLabel").textContent = dataLabel;
     recalc();
