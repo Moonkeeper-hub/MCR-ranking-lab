@@ -29,6 +29,7 @@ import { LruCache, stableSerialize } from "./performanceCache";
 import { RatingWorkerPool } from "./workerPool";
 import { defaultTrueSkillTournamentConfig, type TrueSkillTournamentConfig, type TrueSkillTournamentResult } from "./engine/trueskillTournament";
 import { defaultEloPlConfig, type EloPlConfig, type EloPlResult, type EloNormalization } from "./engine/eloPl";
+import { renderMockWorkspace } from "./mockUi";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 
@@ -82,7 +83,7 @@ let rankingSortKey: RankingSortKey = "rank";
 let rankingSortDir: "asc" | "desc" = "asc";
 let expandedPlayerId: string | null = null;
 
-let activeWorkspace: "comparison" | "lab" = "comparison";
+let activeWorkspace: "comparison" | "lab" | "mock" = "comparison";
 let historyInitialMode: InitialStateMode = "clean";
 
 type HistoryMethodId = string;
@@ -1025,7 +1026,7 @@ function renderShell(): void {
 
   app.innerHTML = `
     <div class="app">
-      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.30.2 · TypeScript · MCR-2026 + RR + TrueSkill Tournament + Elo-PL · 2 workers · расчёт выполняется в браузере</div></div>
+      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.31.0 · TypeScript · MCR-2026 + RR + TrueSkill Tournament + Elo-PL · 2 workers · расчёт выполняется в браузере</div></div>
         <div class="topbar-actions"><div class="privacy-pill">CSV остаются на устройстве пользователя</div>
         <div class="support-wrap"><button id="supportButton" class="support-button" type="button">Donate / Support</button>
         <div id="supportPopover" class="support-popover" hidden><strong>Поддержать проект</strong><span>Перевод по номеру телефона на Сбербанк</span><div class="support-number-row"><code>+7 967 087 1525</code><button id="copySupportNumber" type="button">Копировать</button></div><span id="supportCopyStatus" class="micro"></span></div></div></div>
@@ -1034,6 +1035,7 @@ function renderShell(): void {
       <nav class="workspace-tabs" aria-label="Режим работы">
         <button id="workspaceComparison" class="workspace-tab ${activeWorkspace === "comparison" ? "active" : ""}" type="button">Сравнение методик + история</button>
         <button id="workspaceLab" class="workspace-tab ${activeWorkspace === "lab" ? "active" : ""}" type="button">Лаборатория</button>
+        <button id="workspaceMock" class="workspace-tab ${activeWorkspace === "mock" ? "active" : ""}" type="button">Mock generator</button>
       </nav>
 
       <section id="comparisonWorkspace" class="workspace-panel ${activeWorkspace === "comparison" ? "active" : ""} comparison-workspace">
@@ -1090,6 +1092,8 @@ function renderShell(): void {
           </section>
         </main>
       </div></div>
+
+      <section id="mockWorkspace" class="workspace-panel ${activeWorkspace === "mock" ? "active" : ""}"><main class="main mock-main" id="mockWorkspaceMount"></main></section>
     </div>`;
 
   const dataLabelEl = document.getElementById("dataLabel"); if (dataLabelEl) dataLabelEl.textContent = dataLabel;
@@ -1103,6 +1107,7 @@ function renderShell(): void {
 
   document.getElementById("workspaceComparison")?.addEventListener("click", () => setWorkspace("comparison"));
   document.getElementById("workspaceLab")?.addEventListener("click", () => setWorkspace("lab"));
+  document.getElementById("workspaceMock")?.addEventListener("click", () => setWorkspace("mock"));
   document.getElementById("labMethodSelect")?.addEventListener("change", (e) => { activeLabMethod = (e.currentTarget as HTMLSelectElement).value as LabMethod; activeFormulaToken=null; activeRrFormulaToken=null; activeTrueSkillFormulaToken=null; activeEloPlFormulaToken=null; renderShell(); recalc(); });
   document.getElementById("evaluationDate")?.addEventListener("change", (e)=>{ evaluationDateState=(e.currentTarget as HTMLInputElement).value; recalc(); });
   document.getElementById("loadFiles")?.addEventListener("click", loadFiles);
@@ -1138,6 +1143,13 @@ function renderShell(): void {
   document.getElementById("historyInitialMode")?.addEventListener("change",(e)=>{historyInitialMode=(e.currentTarget as HTMLSelectElement).value as InitialStateMode;historyDirty=true;historySnapshotIndex=0;distanceMetricCache.clear();renderHistoryWorkspace();renderDistanceMetrics();});
   document.getElementById("historySlider")?.addEventListener("input",(e)=>{historySnapshotIndex=Number((e.currentTarget as HTMLInputElement).value);historyExpandedPlayerId=null;renderHistorySnapshot();});
   document.getElementById("historyPlayerSelect")?.addEventListener("change",(e)=>{historyPlayerId=(e.currentTarget as HTMLSelectElement).value||null;renderHistoryPlayerChart();});
+  if (activeWorkspace === "mock") {
+    const mount = document.getElementById("mockWorkspaceMount");
+    if (mount) renderMockWorkspace(mount, { useDataset: (mockPlayers, mockResults, label) => {
+      players = mockPlayers; results = mockResults; dataLabel = label; evaluationDateState = mockResults.length ? [...mockResults].sort((a,b)=>String(b.tournament_date).localeCompare(String(a.tournament_date)))[0].tournament_date : todayIso();
+      markDatasetChanged(); activeWorkspace = "comparison"; renderShell(); void recalc();
+    }});
+  }
 }
 
 function getActiveFormulaToken(): string | null {
@@ -1950,13 +1962,22 @@ function renderOutput(): void {
 }
 
 
-function setWorkspace(workspace: "comparison" | "lab"): void {
+function setWorkspace(workspace: "comparison" | "lab" | "mock"): void {
   activeWorkspace = workspace;
   document.getElementById("comparisonWorkspace")?.classList.toggle("active", workspace === "comparison");
   document.getElementById("labWorkspace")?.classList.toggle("active", workspace === "lab");
+  document.getElementById("mockWorkspace")?.classList.toggle("active", workspace === "mock");
   document.getElementById("workspaceComparison")?.classList.toggle("active", workspace === "comparison");
   document.getElementById("workspaceLab")?.classList.toggle("active", workspace === "lab");
+  document.getElementById("workspaceMock")?.classList.toggle("active", workspace === "mock");
   if (workspace === "comparison") { renderComparison(); renderHistoryWorkspace(); }
+  if (workspace === "mock") {
+    const mount = document.getElementById("mockWorkspaceMount");
+    if (mount) renderMockWorkspace(mount, { useDataset: (mockPlayers, mockResults, label) => {
+      players = mockPlayers; results = mockResults; dataLabel = label; evaluationDateState = mockResults.length ? [...mockResults].sort((a,b)=>String(b.tournament_date).localeCompare(String(a.tournament_date)))[0].tournament_date : todayIso();
+      markDatasetChanged(); activeWorkspace = "comparison"; renderShell(); void recalc();
+    }});
+  }
 }
 
 function historyOverrides(): TableOverrides {
