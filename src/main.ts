@@ -25,6 +25,7 @@ import type {
 } from "./engine/types";
 import { loadCsvPair, playersFromCsv, resultsFromCsv } from "./data/csv";
 import { calculateRankingDistanceMetric, type RankingDistanceMetric } from "./analysis/rankingDistance";
+import { evaluatePolynomial, fitPolynomialLeastSquares, type PolynomialFit } from "./analysis/polynomialTrend";
 import { LruCache, stableSerialize } from "./performanceCache";
 import { RatingWorkerPool } from "./workerPool";
 import { defaultTrueSkillTournamentConfig, type TrueSkillTournamentConfig, type TrueSkillTournamentResult } from "./engine/trueskillTournament";
@@ -130,6 +131,7 @@ let historyTableSortDir: "asc" | "desc" = "asc";
 
 let distanceTopN = 100;
 let distanceStep = 5;
+let distanceTrendDegree = 3;
 let datasetRevision = 0;
 const mcrCalculationCache = new LruCache<CalculationResult>(24);
 const rrCalculationCache = new LruCache<RrCalculationResult>(24);
@@ -824,17 +826,55 @@ function xmlEsc(value: unknown): string {
   }[ch]!));
 }
 
+
+function distanceTrend(metric: RankingDistanceMetric, mode: "mean" | "normalized"): PolynomialFit | null {
+  const points = metric.bins
+    .filter((bin) => bin.observations > 0)
+    .map((bin) => ({
+      x: (bin.from + bin.to) / 2,
+      y: mode === "mean" ? bin.meanTournaments : bin.normalizedByAllTournaments,
+    }));
+  return fitPolynomialLeastSquares(points, distanceTrendDegree);
+}
+
+function polynomialLabel(fit: PolynomialFit | null): string {
+  if (!fit) return "МНК: недостаточно данных";
+  const terms = fit.coefficients.map((a, i) => ({ a, i })).filter(({ a }) => Math.abs(a) >= 5e-7);
+  const eq = terms.length ? terms.map(({ a, i }, idx) => {
+    const abs = Math.abs(a);
+    const number = abs >= 100 ? abs.toFixed(1) : abs >= 10 ? abs.toFixed(2) : abs.toFixed(3);
+    const variable = i === 0 ? "" : i === 1 ? "x" : `x^${i}`;
+    const sign = idx === 0 ? (a < 0 ? "−" : "") : (a < 0 ? " − " : " + ");
+    return `${sign}${number}${variable}`;
+  }).join("") : "0";
+  return `МНК p=${fit.degree}, R²=${fit.r2.toFixed(3)} · y=${eq}`;
+}
+
+function polynomialTrendMax(metric: RankingDistanceMetric, mode: "mean" | "normalized"): number {
+  const fit = distanceTrend(metric, mode);
+  if (!fit) return 0;
+  let max = 0;
+  const samples = Math.max(40, metric.bins.length * 4);
+  for (let i = 0; i <= samples; i += 1) {
+    const x = 1 + (metric.topN - 1) * (i / samples);
+    max = Math.max(max, evaluatePolynomial(fit.coefficients, x));
+  }
+  return max;
+}
+
 function histogramPlotSvg(metric: RankingDistanceMetric, mode: "mean" | "normalized", title: string, xOffset = 0, maxOverride?: number): string {
   const width = 700;
   const height = 300;
   const padLeft = 52;
   const padRight = 18;
-  const padTop = 42;
+  const padTop = 54;
   const padBottom = 62;
   const plotW = width - padLeft - padRight;
   const plotH = height - padTop - padBottom;
   const values = metric.bins.map((bin) => mode === "mean" ? bin.meanTournaments : bin.normalizedByAllTournaments);
-  const maxValue = Math.max(1e-9, maxOverride ?? Math.max(...values));
+  const fit = distanceTrend(metric, mode);
+  const curveMax = polynomialTrendMax(metric, mode);
+  const maxValue = Math.max(1e-9, maxOverride ?? Math.max(...values, curveMax));
   const slot = plotW / Math.max(1, metric.bins.length);
   const barW = Math.max(1, slot * 0.76);
   const fill = mode === "mean" ? "#5b8ff9" : "#61d9a3";
@@ -854,27 +894,55 @@ function histogramPlotSvg(metric: RankingDistanceMetric, mode: "mean" | "normali
     const value = maxValue * q;
     return `<line x1="${padLeft}" y1="${y.toFixed(1)}" x2="${width - padRight}" y2="${y.toFixed(1)}" class="grid-line"/><text x="${padLeft - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end" class="axis-label">${value < 10 ? value.toFixed(2) : value.toFixed(1)}</text>`;
   }).join("");
-  return `<g transform="translate(${xOffset},0)"><text x="${padLeft}" y="22" class="plot-title">${xmlEsc(title)}</text>${grid}<line x1="${padLeft}" y1="${padTop}" x2="${padLeft}" y2="${padTop + plotH}" class="axis-line"/><line x1="${padLeft}" y1="${padTop + plotH}" x2="${width - padRight}" y2="${padTop + plotH}" class="axis-line"/>${bars}<text x="${padLeft + plotW / 2}" y="${height - 7}" text-anchor="middle" class="axis-title">Место в рейтинге</text></g>`;
+  let curve = "";
+  if (fit) {
+    const samples = Math.max(80, metric.bins.length * 8);
+    const points: string[] = [];
+    for (let i = 0; i <= samples; i += 1) {
+      const rank = 1 + (metric.topN - 1) * (i / samples);
+      const raw = evaluatePolynomial(fit.coefficients, rank);
+      // Metric values cannot be negative; SVG clips a negative extrapolation at zero.
+      const value = Math.max(0, raw);
+      const x = padLeft + ((rank - 1) / Math.max(1, metric.topN - 1)) * plotW;
+      const y = padTop + plotH - (value / maxValue) * plotH;
+      points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    }
+    curve = `<polyline points="${points.join(" ")}" fill="none" stroke="#f59e0b" stroke-width="2.25" vector-effect="non-scaling-stroke"/><text x="${padLeft}" y="39" class="trend-label">${xmlEsc(polynomialLabel(fit))}</text>`;
+  } else {
+    curve = `<text x="${padLeft}" y="39" class="trend-label">МНК: недостаточно непустых точек</text>`;
+  }
+  return `<g transform="translate(${xOffset},0)"><text x="${padLeft}" y="20" class="plot-title">${xmlEsc(title)}</text>${grid}<line x1="${padLeft}" y1="${padTop}" x2="${padLeft}" y2="${padTop + plotH}" class="axis-line"/><line x1="${padLeft}" y1="${padTop + plotH}" x2="${width - padRight}" y2="${padTop + plotH}" class="axis-line"/>${bars}${curve}<text x="${padLeft + plotW / 2}" y="${height - 7}" text-anchor="middle" class="axis-title">Место в рейтинге</text></g>`;
 }
 
 function distancePairSvg(methodName: string, metric: RankingDistanceMetric): string {
   const width = 1400;
   const height = 340;
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img">
-    <style>.bg{fill:#111827}.plot-title{fill:#f8fafc;font:600 15px system-ui,sans-serif}.axis-label{fill:#94a3b8;font:10px system-ui,sans-serif}.axis-title{fill:#cbd5e1;font:11px system-ui,sans-serif}.axis-line{stroke:#64748b;stroke-width:1}.grid-line{stroke:#334155;stroke-width:1}.method-title{fill:#f8fafc;font:700 18px system-ui,sans-serif}</style>
+    <style>.bg{fill:#111827}.plot-title{fill:#f8fafc;font:600 15px system-ui,sans-serif}.axis-label{fill:#94a3b8;font:10px system-ui,sans-serif}.axis-title{fill:#cbd5e1;font:11px system-ui,sans-serif}.axis-line{stroke:#64748b;stroke-width:1}.grid-line{stroke:#334155;stroke-width:1}.method-title{fill:#f8fafc;font:700 18px system-ui,sans-serif}.trend-label{fill:#f59e0b;font:10px system-ui,sans-serif}</style>
     <rect class="bg" width="100%" height="100%" rx="12"/>
-    <text x="18" y="24" class="method-title">${xmlEsc(methodName)} · Top-${metric.topN} · шаг ${metric.step}</text>
+    <text x="18" y="24" class="method-title">${xmlEsc(methodName)} · Top-${metric.topN} · шаг ${metric.step} · МНК ≤ ${distanceTrendDegree}</text>
     <g transform="translate(0,34)">${histogramPlotSvg(metric, "mean", "Среднее число турниров до места", 0)}${histogramPlotSvg(metric, "normalized", "Σ турниров / все турниры рейтинга", 700)}</g>
   </svg>`;
 }
 
 function distanceCsv(methodName: string, metric: RankingDistanceMetric): string {
-  const lines = [["method","rank_from","rank_to","observations","tournament_sum","mean_tournaments","normalized_by_all_tournaments","processed_tournaments"].map(csvCell).join(",")];
-  metric.bins.forEach((bin) => lines.push([
-    methodName, bin.from, bin.to, bin.observations, bin.tournamentSum,
-    bin.meanTournaments, bin.normalizedByAllTournaments,
-    metric.totalProcessedTournaments,
-  ].map(csvCell).join(",")));
+  const meanFit = distanceTrend(metric, "mean");
+  const normalizedFit = distanceTrend(metric, "normalized");
+  const lines = [[
+    "method","rank_from","rank_to","rank_mid","observations","tournament_sum",
+    "mean_tournaments","mean_trend","normalized_by_all_tournaments","normalized_trend",
+    "fit_degree_mean","fit_r2_mean","fit_degree_normalized","fit_r2_normalized","processed_tournaments",
+  ].map(csvCell).join(",")];
+  metric.bins.forEach((bin) => {
+    const mid = (bin.from + bin.to) / 2;
+    lines.push([
+      methodName, bin.from, bin.to, mid, bin.observations, bin.tournamentSum,
+      bin.meanTournaments, meanFit ? evaluatePolynomial(meanFit.coefficients, mid) : "",
+      bin.normalizedByAllTournaments, normalizedFit ? evaluatePolynomial(normalizedFit.coefficients, mid) : "",
+      meanFit?.degree ?? "", meanFit?.r2 ?? "", normalizedFit?.degree ?? "", normalizedFit?.r2 ?? "",
+      metric.totalProcessedTournaments,
+    ].map(csvCell).join(","));
+  });
   return lines.join("\r\n");
 }
 
@@ -914,8 +982,8 @@ function renderDistanceMetrics(): void {
     }
   });
   const successful = calculated.filter((x): x is { methodId:string; name:string; metric:RankingDistanceMetric; error:null } => Boolean(x.metric));
-  const sharedMeanMax = Math.max(1e-9, ...successful.flatMap((x) => x.metric.bins.map((bin) => bin.meanTournaments)));
-  const sharedNormalizedMax = Math.max(1e-9, ...successful.flatMap((x) => x.metric.bins.map((bin) => bin.normalizedByAllTournaments)));
+  const sharedMeanMax = Math.max(1e-9, ...successful.flatMap((x) => [...x.metric.bins.map((bin) => bin.meanTournaments), polynomialTrendMax(x.metric, "mean")]));
+  const sharedNormalizedMax = Math.max(1e-9, ...successful.flatMap((x) => [...x.metric.bins.map((bin) => bin.normalizedByAllTournaments), polynomialTrendMax(x.metric, "normalized")]));
 
   host.innerHTML = calculated.map(({ methodId, name, metric, error }) => {
     if (!metric) return `<article class="distance-method-card"><h3>${esc(name)}</h3><div class="notice error">${esc(error)}</div></article>`;
@@ -928,8 +996,8 @@ function renderDistanceMetrics(): void {
       <div class="distance-actions"><button class="download-button" data-distance-svg="${esc(methodId)}" type="button">↓ SVG</button><button class="download-button" data-distance-csv="${esc(methodId)}" type="button">↓ CSV</button></div></div>
       <div class="distance-observation-summary"><span>новый личный максимум: <strong>${firstCount}</strong></span><span>повтор #1: <strong>${repeatCount}</strong></span><span>остаток после #1: <strong>${endCount}</strong></span><span>непустых диапазонов: <strong>${nonEmptyBins}</strong></span></div>
       <div class="distance-chart-pair">
-        <div class="distance-chart"><div class="snapshot-subtitle">Среднее число сыгранных турниров</div><svg viewBox="0 0 700 300" role="img" aria-label="${esc(name)} — средняя дистанция"><style>.plot-title{fill:currentColor;font:600 15px system-ui,sans-serif}.axis-label{fill:#94a3b8;font:10px system-ui,sans-serif}.axis-title{fill:#94a3b8;font:11px system-ui,sans-serif}.axis-line{stroke:#64748b}.grid-line{stroke:#334155}</style>${histogramPlotSvg(metric,"mean","Σ турниров / число наблюдений",0,sharedMeanMax)}</svg></div>
-        <div class="distance-chart"><div class="snapshot-subtitle">Нормировка на все турниры рейтинга</div><svg viewBox="0 0 700 300" role="img" aria-label="${esc(name)} — нормированная дистанция"><style>.plot-title{fill:currentColor;font:600 15px system-ui,sans-serif}.axis-label{fill:#94a3b8;font:10px system-ui,sans-serif}.axis-title{fill:#94a3b8;font:11px system-ui,sans-serif}.axis-line{stroke:#64748b}.grid-line{stroke:#334155}</style>${histogramPlotSvg(metric,"normalized","Σ турниров / все турниры рейтинга",0,sharedNormalizedMax)}</svg></div>
+        <div class="distance-chart"><div class="snapshot-subtitle">Среднее число сыгранных турниров</div><svg viewBox="0 0 700 300" role="img" aria-label="${esc(name)} — средняя дистанция"><style>.plot-title{fill:currentColor;font:600 15px system-ui,sans-serif}.axis-label{fill:#94a3b8;font:10px system-ui,sans-serif}.axis-title{fill:#94a3b8;font:11px system-ui,sans-serif}.axis-line{stroke:#64748b}.grid-line{stroke:#334155}.trend-label{fill:#f59e0b;font:10px system-ui,sans-serif}</style>${histogramPlotSvg(metric,"mean","Σ турниров / число наблюдений",0,sharedMeanMax)}</svg></div>
+        <div class="distance-chart"><div class="snapshot-subtitle">Нормировка на все турниры рейтинга</div><svg viewBox="0 0 700 300" role="img" aria-label="${esc(name)} — нормированная дистанция"><style>.plot-title{fill:currentColor;font:600 15px system-ui,sans-serif}.axis-label{fill:#94a3b8;font:10px system-ui,sans-serif}.axis-title{fill:#94a3b8;font:11px system-ui,sans-serif}.axis-line{stroke:#64748b}.grid-line{stroke:#334155}.trend-label{fill:#f59e0b;font:10px system-ui,sans-serif}</style>${histogramPlotSvg(metric,"normalized","Σ турниров / все турниры рейтинга",0,sharedNormalizedMax)}</svg></div>
       </div>
     </article>`;
   }).join("");
@@ -1026,7 +1094,7 @@ function renderShell(): void {
 
   app.innerHTML = `
     <div class="app">
-      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.31.1 · TypeScript · MCR-2026 + RR + TrueSkill Tournament + Elo-PL · 2 workers · расчёт выполняется в браузере</div></div>
+      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.31.2 · TypeScript · MCR-2026 + RR + TrueSkill Tournament + Elo-PL · 2 workers · расчёт выполняется в браузере</div></div>
         <div class="topbar-actions"><div class="privacy-pill">CSV остаются на устройстве пользователя</div>
         <div class="support-wrap"><button id="supportButton" class="support-button" type="button">Donate / Support</button>
         <div id="supportPopover" class="support-popover" hidden><strong>Поддержать проект</strong><span>Перевод по номеру телефона на Сбербанк</span><div class="support-number-row"><code>+7 967 087 1525</code><button id="copySupportNumber" type="button">Копировать</button></div><span id="supportCopyStatus" class="micro"></span></div></div></div>
@@ -1052,8 +1120,9 @@ function renderShell(): void {
             <div class="distance-toolbar">
               <label>Top-N <input id="distanceTopN" type="number" min="1" max="500" step="1" value="${distanceTopN}"></label>
               <label>Шаг мест <input id="distanceStep" type="range" min="1" max="10" step="1" value="${distanceStep}"><output id="distanceStepValue">${distanceStep}</output></label>
+              <label>Порядок МНК <select id="distanceTrendDegree"><option value="1" ${distanceTrendDegree===1?"selected":""}>1 — линейный</option><option value="2" ${distanceTrendDegree===2?"selected":""}>2 — квадратичный</option><option value="3" ${distanceTrendDegree===3?"selected":""}>3 — кубический</option></select></label>
             </div>
-            <details class="distance-explainer"><summary>Как считается метрика</summary><div class="notice">Первая рейтинговая позиция игрока задаёт исходное достижение и сама в пары не входит. До первого выхода на #1 пара (число сыгранных турниров; место) создаётся только при строгом улучшении личного лучшего места. Считаются турниры игрока после предыдущего достижения, включая турнир нового рекорда. После первого #1 цель фиксируется на первом месте: считаются дистанции до каждого повторного #1. Если история заканчивается раньше следующего повторения, остаток турнирной дистанции фиксируется как незавершённое наблюдение #1. Если игрок ни разу не достиг #1, незавершённый отрезок без нового личного рекорда не добавляется. В графики входят достижения в пределах выбранного Top-N.</div></details>
+            <details class="distance-explainer"><summary>Как считается метрика</summary><div class="notice">Первая рейтинговая позиция игрока задаёт исходное достижение и сама в пары не входит. До первого выхода на #1 пара (число сыгранных турниров; место) создаётся только при строгом улучшении личного лучшего места. Считаются турниры игрока после предыдущего достижения, включая турнир нового рекорда. После первого #1 цель фиксируется на первом месте: считаются дистанции до каждого повторного #1. Если история заканчивается раньше следующего повторения, остаток турнирной дистанции фиксируется как незавершённое наблюдение #1. Если игрок ни разу не достиг #1, незавершённый отрезок без нового личного рекорда не добавляется. В графики входят достижения в пределах выбранного Top-N. Поверх каждого ряда строится единая полиномиальная кривая МНК по всем непустым диапазонам ряда. Порядок выбирается от 1 до 3; при недостатке точек автоматически понижается. Кривая экстраполируется на весь диапазон Top-N.</div></details>
             <div id="distanceMetricMethods" class="distance-methods"></div>
           </section>
 
@@ -1140,6 +1209,7 @@ function renderShell(): void {
 
   document.getElementById("distanceTopN")?.addEventListener("change",(e)=>{distanceTopN=Math.max(1,Math.min(500,Math.floor(Number((e.currentTarget as HTMLInputElement).value)||100)));distanceMetricCache.clear();renderDistanceMetrics();});
   document.getElementById("distanceStep")?.addEventListener("input",(e)=>{distanceStep=Math.max(1,Math.min(10,Math.floor(Number((e.currentTarget as HTMLInputElement).value)||1)));const out=document.getElementById("distanceStepValue");if(out)out.textContent=String(distanceStep);distanceMetricCache.clear();renderDistanceMetrics();});
+  document.getElementById("distanceTrendDegree")?.addEventListener("change",(e)=>{distanceTrendDegree=Math.max(1,Math.min(3,Math.floor(Number((e.currentTarget as HTMLSelectElement).value)||3)));renderDistanceMetrics();});
   document.getElementById("historyInitialMode")?.addEventListener("change",(e)=>{historyInitialMode=(e.currentTarget as HTMLSelectElement).value as InitialStateMode;historyDirty=true;historySnapshotIndex=0;distanceMetricCache.clear();renderHistoryWorkspace();renderDistanceMetrics();});
   document.getElementById("historySlider")?.addEventListener("input",(e)=>{historySnapshotIndex=Number((e.currentTarget as HTMLInputElement).value);historyExpandedPlayerId=null;renderHistorySnapshot();});
   document.getElementById("historyPlayerSelect")?.addEventListener("change",(e)=>{historyPlayerId=(e.currentTarget as HTMLSelectElement).value||null;renderHistoryPlayerChart();});
