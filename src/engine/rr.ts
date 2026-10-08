@@ -7,8 +7,11 @@ export interface RrRangeBand {
   increment: number;
 }
 
+export type RrFirstPartMode = "smooth_decay" | "legacy_discrete";
+
 export interface RrConfig {
   ratingWindowDays: number;
+  firstPartMode: RrFirstPartMode;
   minimumTournaments: number;
   firstPartBaseTournaments: number;
   firstPartAdditionalShare: number;
@@ -57,6 +60,8 @@ export interface RrTournamentContribution {
   weightedCoefficient: number;
   delta: number;
   firstPartActive: boolean;
+  /** Fractional contribution in P1: 1, 0.8, 0.6, 0.4, 0.2 or 0 under PR #193 defaults. */
+  firstPartWeightFactor: number;
   secondPartActive: boolean;
 }
 
@@ -97,6 +102,7 @@ export const RR_DEFAULT_SESSION_BANDS: RrRangeBand[] = [
 
 export const RR_DEFAULT_CONFIG: RrConfig = {
   ratingWindowDays: 365 * 2,
+  firstPartMode: "smooth_decay",
   minimumTournaments: 2,
   firstPartBaseTournaments: 5,
   firstPartAdditionalShare: 0.80,
@@ -268,6 +274,27 @@ export class RrEngine {
     return this.bandCoefficient(sessions, 1, this.sessionBands, this.config.sessionsCoefficientCap);
   }
 
+  private assumedSessions(row: ResultInput): number {
+    const raw = Number(row.sessions);
+    if (raw !== 0) return raw;
+
+    // Exact fallback from portal rr.py for tournaments with unknown sessions:
+    // 1 day -> 4, 2 days -> 8, 3+ days -> 12.
+    // The Python implementation uses (end_date - start_date).days, capped at 3.
+    const startRaw = row.tournament_start_date;
+    const endRaw = row.tournament_end_date ?? row.tournament_date;
+    if (!startRaw || !endRaw) return 0;
+
+    const start = parseDate(startRaw);
+    const end = parseDate(endRaw);
+    if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) return 0;
+
+    let days = Math.floor((end.getTime() - start.getTime()) / 86400000);
+    if (days > 3) days = 3;
+    if (days < 0) return 0;
+    return days * 4;
+  }
+
   tournamentTypeMultiplier(type: unknown): number {
     const key = String(type ?? "").trim().toLowerCase();
     return this.tournamentTypeMultipliers[key] ?? 1;
@@ -293,7 +320,7 @@ export class RrEngine {
     specialOverride: number | null;
   } {
     const pc = this.playersCoefficient(Number(row.participants));
-    const sc = this.sessionsCoefficient(Number(row.sessions));
+    const sc = this.sessionsCoefficient(this.assumedSessions(row));
     const tm = this.tournamentTypeMultiplier(row.tournament_type);
     const base = (pc + sc) * tm;
     const specialOverride = this.specialCoefficient(row.tournament_id, row.player_id);
@@ -310,13 +337,14 @@ export class RrEngine {
   }
 
   selectedFirstPartTournamentCount(total: number): number {
+    // Legacy portal rule: 5 + ceil(80% of tournaments beyond the first five).
     if (total <= this.config.firstPartBaseTournaments) return total;
     return this.config.firstPartBaseTournaments
       + Math.ceil((total - this.config.firstPartBaseTournaments) * this.config.firstPartAdditionalShare);
   }
 
-  private chooseFirstPart(rows: RrTournamentContribution[], count: number): RrTournamentContribution[] {
-    if (rows.length <= count) return [...rows];
+  private chooseFirstPartLegacy(rows: RrTournamentContribution[], count: number): Array<{ row: RrTournamentContribution; weight: number }> {
+    if (rows.length <= count) return rows.map((row) => ({ row, weight: 1 }));
 
     if (rows.length === count + 1) {
       let bestScore = -1;
@@ -337,10 +365,9 @@ export class RrEngine {
           best = candidate;
         }
       }
-      return best;
+      return best.map((row) => ({ row, weight: 1 }));
     }
 
-    // Exact port of rr.py's fractional-programming binary search.
     let left = 0;
     let right = this.config.baseRankScale;
     for (let iteration = 0; iteration < 80; iteration += 1) {
@@ -357,7 +384,65 @@ export class RrEngine {
       .map((row) => ({ row, value: row.delta - bestScore * row.weightedCoefficient }))
       .sort((a, b) => b.value - a.value)
       .slice(0, count)
-      .map((x) => x.row);
+      .map((x) => ({ row: x.row, weight: 1 }));
+  }
+
+  private chooseFirstPartSmooth(rows: RrTournamentContribution[]): Array<{ row: RrTournamentContribution; weight: number }> {
+    const total = rows.length;
+    const base = this.config.firstPartBaseTournaments;
+    if (total <= base) return rows.map((row) => ({ row, weight: 1 }));
+
+    // PR #193: 5 + 80% of additional tournaments is treated as a continuous
+    // amount. Under defaults this yields:
+    // 6 -> 5 + 0.8, 7 -> 6 + 0.6, 8 -> 7 + 0.4, 9 -> 8 + 0.2, 10 -> 9.
+    const effectiveCount = base + (total - base) * this.config.firstPartAdditionalShare;
+    const fullCount = Math.floor(effectiveCount + 1e-12);
+    const partial = Number((effectiveCount - fullCount).toFixed(12));
+    const selectedCount = fullCount + (partial > 1e-12 ? 1 : 0);
+
+    if (selectedCount >= total && partial <= 1e-12) {
+      return rows.map((row) => ({ row, weight: 1 }));
+    }
+
+    // Fractional-programming search, matching PR #193 semantics:
+    // fullCount best impacts have weight 1; the next impact has fractional weight.
+    let left = 0;
+    let right = this.config.baseRankScale;
+    for (let iteration = 0; iteration < 80; iteration += 1) {
+      const check = (left + right) / 2;
+      const impacts = rows
+        .map((row) => row.delta - check * row.weightedCoefficient)
+        .sort((a, b) => b - a);
+
+      let sum = impacts.slice(0, fullCount).reduce((acc, value) => acc + value, 0);
+      if (partial > 1e-12 && impacts.length > fullCount) {
+        sum += impacts[fullCount] * partial;
+      }
+
+      if (sum >= 0) left = check;
+      else right = check;
+    }
+
+    const bestScore = (left + right) / 2;
+    const ordered = rows
+      .map((row) => ({ row, impact: row.delta - bestScore * row.weightedCoefficient }))
+      .sort((a, b) => b.impact - a.impact);
+
+    const result: Array<{ row: RrTournamentContribution; weight: number }> = [];
+    for (let i = 0; i < Math.min(fullCount, ordered.length); i += 1) {
+      result.push({ row: ordered[i].row, weight: 1 });
+    }
+    if (partial > 1e-12 && ordered.length > fullCount) {
+      result.push({ row: ordered[fullCount].row, weight: partial });
+    }
+    return result;
+  }
+
+  private chooseFirstPart(rows: RrTournamentContribution[]): Array<{ row: RrTournamentContribution; weight: number }> {
+    if (this.config.firstPartMode === "legacy_discrete") {
+      return this.chooseFirstPartLegacy(rows, this.selectedFirstPartTournamentCount(rows.length));
+    }
+    return this.chooseFirstPartSmooth(rows);
   }
 
   calculate(
@@ -383,6 +468,10 @@ export class RrEngine {
         place: Number(r.place),
         participants: Number(r.participants),
         sessions: Number(r.sessions),
+      }))
+      .map((r) => ({
+        ...r,
+        sessions: this.assumedSessions(r),
       }))
       .filter((r) => {
         const d = parseDate(r.tournament_date);
@@ -463,6 +552,7 @@ export class RrEngine {
         weightedCoefficient,
         delta: br * weightedCoefficient,
         firstPartActive: false,
+        firstPartWeightFactor: 0,
         secondPartActive: false,
       });
     }
@@ -479,13 +569,16 @@ export class RrEngine {
       const total = playerRows.length;
       if (total < this.config.minimumTournaments) continue;
 
-      const firstCount = this.selectedFirstPartTournamentCount(total);
-      const firstRows = this.chooseFirstPart(playerRows, firstCount);
-      firstRows.forEach((row) => { row.firstPartActive = true; });
+      const firstSelection = this.chooseFirstPart(playerRows);
+      firstSelection.forEach(({ row, weight }) => {
+        row.firstPartActive = weight > 0;
+        row.firstPartWeightFactor = weight;
+      });
 
-      let firstNumerator = firstRows.reduce((sum, row) => sum + row.delta, 0);
-      let firstDenominator = firstRows.reduce((sum, row) => sum + row.weightedCoefficient, 0);
-      const missing = Math.max(0, this.config.firstPartBaseTournaments - firstRows.length);
+      let firstNumerator = firstSelection.reduce((sum, x) => sum + x.row.delta * x.weight, 0);
+      let firstDenominator = firstSelection.reduce((sum, x) => sum + x.row.weightedCoefficient * x.weight, 0);
+      const effectiveSelected = firstSelection.reduce((sum, x) => sum + x.weight, 0);
+      const missing = Math.max(0, this.config.firstPartBaseTournaments - effectiveSelected);
       firstDenominator += missing * this.config.firstPartMissingDenominator;
       const firstPart = firstDenominator > 0 ? firstNumerator / firstDenominator : 0;
 
@@ -504,7 +597,7 @@ export class RrEngine {
         firstPart,
         secondPart,
         tournamentsCount: total,
-        selectedFirstPartCount: firstRows.length,
+        selectedFirstPartCount: firstSelection.filter((x) => x.weight > 0).length,
         selectedSecondPartCount: secondRows.length,
       });
     }

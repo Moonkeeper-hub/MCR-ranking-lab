@@ -560,7 +560,12 @@ function rrControlHtml(def: typeof RR_CONTROL_DEFS[number]): string {
 
 function renderRrControls(): void {
   const scalars = document.querySelector<HTMLDivElement>("#rrScalarControls");
-  if (scalars) scalars.innerHTML = RR_CONTROL_DEFS.map(rrControlHtml).join("");
+  if (scalars) scalars.innerHTML = `
+    <label class="select-row"><span>Отбор турниров P1</span><select id="rrFirstPartMode">
+      <option value="smooth_decay" ${rrConfig.firstPartMode === "smooth_decay" ? "selected" : ""}>Smooth decay — PR #193 default</option>
+      <option value="legacy_discrete" ${rrConfig.firstPartMode === "legacy_discrete" ? "selected" : ""}>Legacy 5 + ceil(80%)</option>
+    </select></label>
+    ${RR_CONTROL_DEFS.map(rrControlHtml).join("")}`;
 
   const playerBands = document.querySelector<HTMLDivElement>("#rrPlayerBands");
   if (playerBands) playerBands.innerHTML = rrBandTable(rrPlayerBands, "player");
@@ -617,6 +622,10 @@ function rrBandTable(bands: RrRangeBand[], kind: "player" | "session"): string {
 }
 
 function bindRrControls(): void {
+  document.querySelector<HTMLSelectElement>("#rrFirstPartMode")?.addEventListener("change", (e) => {
+    rrConfig.firstPartMode = (e.currentTarget as HTMLSelectElement).value as RrConfig["firstPartMode"];
+    scheduleRecalc(0);
+  });
   document.querySelectorAll<HTMLInputElement>("[data-rr-config-key]").forEach((input) => {
     input.oninput = () => {
       const key = input.dataset.rrConfigKey as RrNumericKey;
@@ -1030,7 +1039,7 @@ function renderShell(): void {
 
   app.innerHTML = `
     <div class="app">
-      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.31.3 · TypeScript · MCR-2026 + RR + TrueSkill Tournament + Elo-PL · 2 workers · расчёт выполняется в браузере</div></div>
+      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.31.4 · TypeScript · MCR-2026 + RR + TrueSkill Tournament + Elo-PL · 2 workers · расчёт выполняется в браузере</div></div>
         <div class="topbar-actions"><div class="privacy-pill">CSV остаются на устройстве пользователя</div>
         <div class="support-wrap"><button id="supportButton" class="support-button" type="button">Donate / Support</button>
         <div id="supportPopover" class="support-popover" hidden><strong>Поддержать проект</strong><span>Перевод по номеру телефона на Сбербанк</span><div class="support-number-row"><code>+7 967 087 1525</code><button id="copySupportNumber" type="button">Копировать</button></div><span id="supportCopyStatus" class="micro"></span></div></div></div>
@@ -1090,7 +1099,7 @@ function renderShell(): void {
             <div id="legacyFormulaMount" class="legacy-formula-mount">${renderActiveFormula()}</div>
             <div class="formula-hint">Нажмите на коэффициент или обозначение — ниже появятся пояснение и связанные редактируемые параметры.</div><div id="formulaInspector" class="formula-inspector"></div>
           </section>
-          ${activeLabMethod === "mcr" ? `<details class="reference-card"><summary><span>Справочники MCR-2026 — посмотреть и поиграть</span><span class="summary-note">канон + экспериментальные копии</span></summary><div class="reference-body"><div class="tabs" id="tabs"></div><div id="referencePanel"></div></div></details>` : activeLabMethod === "rr" ? `<details class="reference-card"><summary><span>RR — правила и допуски</span><span class="summary-note">исходная методика</span></summary><div class="reference-body rr-about"><p><strong>Окно:</strong> последние два года. В рейтинге отображаются игроки минимум с двумя неустаревшими турнирами.</p><p><strong>С 2018 года:</strong> в исходной системе учитываются аккредитованные открытые турниры от 16 игроков и от 4 ханчанов; клубные зарубежные турниры не учитываются. Browser-lab предполагает, что загруженный CSV уже отфильтрован по аккредитации/открытости, потому что этих полей в текущей схеме CSV нет.</p><p><strong>Игроки замены:</strong> входят в число участников N при расчёте базового ранга и коэффициента турнира, но сами не отображаются в RR.</p></div></details>` : alternativeMethodReferenceHtml()}
+          ${activeLabMethod === "mcr" ? `<details class="reference-card"><summary><span>Справочники MCR-2026 — посмотреть и поиграть</span><span class="summary-note">канон + экспериментальные копии</span></summary><div class="reference-body"><div class="tabs" id="tabs"></div><div id="referencePanel"></div></div></details>` : activeLabMethod === "rr" ? `<details class="reference-card"><summary><span>RR — правила и допуски</span><span class="summary-note">исходная методика</span></summary><div class="reference-body rr-about"><p><strong>Окно:</strong> последние два года. В рейтинге отображаются игроки минимум с двумя неустаревшими турнирами.</p><p><strong>P1 default:</strong> smooth tournament decay из PR #193: после первых 5 турниров каждый следующий постепенно уменьшает вес текущего худшего результата на 20%; legacy 5 + ceil(80%) доступен в лаборатории.</p><p><strong>sessions=0:</strong> применяется fallback портала по длительности турнира: 1 день → 4, 2 дня → 8, 3+ дня → 12 ханчанов, если доступны даты начала/окончания.</p><p><strong>С 2018 года:</strong> в исходной системе учитываются аккредитованные открытые турниры от 16 игроков и от 4 ханчанов; клубные зарубежные турниры не учитываются. Browser-lab предполагает, что загруженный CSV уже отфильтрован по аккредитации/открытости, потому что этих полей в текущей схеме CSV нет.</p><p><strong>Игроки замены:</strong> входят в число участников N при расчёте базового ранга и коэффициента турнира, но сами не отображаются в RR.</p></div></details>` : alternativeMethodReferenceHtml()}
           <section class="results-card"><div class="results-head"><div><h2>Рейтинговая таблица</h2><div class="reference-labels"><span>Текущая: <strong>${labMethodName()} / пользовательская конфигурация</strong></span><span>Default: <strong>${labMethodName()} default</strong></span></div></div><div id="metrics" class="metrics-strip"></div></div>
             <div class="ranking-toolbar"><label class="ranking-search"><span>Поиск</span><input id="rankingSearch" type="search" placeholder="Игрок, ID…" value="${esc(rankingSearch)}"></label><div class="ranking-toolbar-actions"><span id="rankingVisibleCount" class="micro"></span><button id="exportRankingCsv" class="download-button" type="button">↓ CSV</button></div></div><div id="deltaLeaders" class="delta-leaders"></div><div id="ranking"></div>
           </section>
