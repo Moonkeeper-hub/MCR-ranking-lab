@@ -863,17 +863,17 @@ function distancePairSvg(methodName: string, metric: RankingDistanceMetric): str
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img">
     <style>.bg{fill:#111827}.plot-title{fill:#f8fafc;font:600 15px system-ui,sans-serif}.axis-label{fill:#94a3b8;font:10px system-ui,sans-serif}.axis-title{fill:#cbd5e1;font:11px system-ui,sans-serif}.axis-line{stroke:#64748b;stroke-width:1}.grid-line{stroke:#334155;stroke-width:1}.method-title{fill:#f8fafc;font:700 18px system-ui,sans-serif}</style>
     <rect class="bg" width="100%" height="100%" rx="12"/>
-    <text x="18" y="24" class="method-title">${xmlEsc(methodName)} · Top-${metric.topN} · шаг ${metric.step} · окно ${metric.horizonMonths} мес.</text>
+    <text x="18" y="24" class="method-title">${xmlEsc(methodName)} · Top-${metric.topN} · шаг ${metric.step}</text>
     <g transform="translate(0,34)">${histogramPlotSvg(metric, "mean", "Среднее число турниров до места", 0)}${histogramPlotSvg(metric, "normalized", "Σ турниров / все турниры рейтинга", 700)}</g>
   </svg>`;
 }
 
 function distanceCsv(methodName: string, metric: RankingDistanceMetric): string {
-  const lines = [["method","rank_from","rank_to","observations","tournament_sum","mean_tournaments","normalized_by_all_tournaments","horizon_months","processed_tournaments"].map(csvCell).join(",")];
+  const lines = [["method","rank_from","rank_to","observations","tournament_sum","mean_tournaments","normalized_by_all_tournaments","processed_tournaments"].map(csvCell).join(",")];
   metric.bins.forEach((bin) => lines.push([
     methodName, bin.from, bin.to, bin.observations, bin.tournamentSum,
     bin.meanTournaments, bin.normalizedByAllTournaments,
-    metric.horizonMonths, metric.totalProcessedTournaments,
+    metric.totalProcessedTournaments,
   ].map(csvCell).join(",")));
   return lines.join("\r\n");
 }
@@ -924,9 +924,9 @@ function renderDistanceMetrics(): void {
     const endCount = metric.observations.filter((x) => x.kind === "end").length;
     const nonEmptyBins = metric.bins.filter((x) => x.observations > 0).length;
     return `<article class="distance-method-card" data-distance-method="${esc(methodId)}">
-      <div class="distance-method-head"><div><h3>${esc(name)}</h3><div class="reference-labels"><span>окно ${metric.horizonMonths} мес.</span><span>${metric.players} игроков</span><span>${metric.totalProcessedTournaments} турниров</span><span>${metric.observations.length} наблюдений</span></div></div>
+      <div class="distance-method-head"><div><h3>${esc(name)}</h3><div class="reference-labels"><span>${metric.players} игроков</span><span>${metric.totalProcessedTournaments} турниров</span><span>${metric.observations.length} наблюдений</span></div></div>
       <div class="distance-actions"><button class="download-button" data-distance-svg="${esc(methodId)}" type="button">↓ SVG</button><button class="download-button" data-distance-csv="${esc(methodId)}" type="button">↓ CSV</button></div></div>
-      <div class="distance-observation-summary"><span>первое достижение: <strong>${firstCount}</strong></span><span>повторное: <strong>${repeatCount}</strong></span><span>конец истории: <strong>${endCount}</strong></span><span>непустых диапазонов: <strong>${nonEmptyBins}</strong></span></div>
+      <div class="distance-observation-summary"><span>новый личный максимум: <strong>${firstCount}</strong></span><span>повтор #1: <strong>${repeatCount}</strong></span><span>остаток после #1: <strong>${endCount}</strong></span><span>непустых диапазонов: <strong>${nonEmptyBins}</strong></span></div>
       <div class="distance-chart-pair">
         <div class="distance-chart"><div class="snapshot-subtitle">Среднее число сыгранных турниров</div><svg viewBox="0 0 700 300" role="img" aria-label="${esc(name)} — средняя дистанция"><style>.plot-title{fill:currentColor;font:600 15px system-ui,sans-serif}.axis-label{fill:#94a3b8;font:10px system-ui,sans-serif}.axis-title{fill:#94a3b8;font:11px system-ui,sans-serif}.axis-line{stroke:#64748b}.grid-line{stroke:#334155}</style>${histogramPlotSvg(metric,"mean","Σ турниров / число наблюдений",0,sharedMeanMax)}</svg></div>
         <div class="distance-chart"><div class="snapshot-subtitle">Нормировка на все турниры рейтинга</div><svg viewBox="0 0 700 300" role="img" aria-label="${esc(name)} — нормированная дистанция"><style>.plot-title{fill:currentColor;font:600 15px system-ui,sans-serif}.axis-label{fill:#94a3b8;font:10px system-ui,sans-serif}.axis-title{fill:#94a3b8;font:11px system-ui,sans-serif}.axis-line{stroke:#64748b}.grid-line{stroke:#334155}</style>${histogramPlotSvg(metric,"normalized","Σ турниров / все турниры рейтинга",0,sharedNormalizedMax)}</svg></div>
@@ -1026,7 +1026,7 @@ function renderShell(): void {
 
   app.innerHTML = `
     <div class="app">
-      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.31.0 · TypeScript · MCR-2026 + RR + TrueSkill Tournament + Elo-PL · 2 workers · расчёт выполняется в браузере</div></div>
+      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.31.1 · TypeScript · MCR-2026 + RR + TrueSkill Tournament + Elo-PL · 2 workers · расчёт выполняется в браузере</div></div>
         <div class="topbar-actions"><div class="privacy-pill">CSV остаются на устройстве пользователя</div>
         <div class="support-wrap"><button id="supportButton" class="support-button" type="button">Donate / Support</button>
         <div id="supportPopover" class="support-popover" hidden><strong>Поддержать проект</strong><span>Перевод по номеру телефона на Сбербанк</span><div class="support-number-row"><code>+7 967 087 1525</code><button id="copySupportNumber" type="button">Копировать</button></div><span id="supportCopyStatus" class="micro"></span></div></div></div>
@@ -1047,13 +1047,13 @@ function renderShell(): void {
             <div id="comparisonRanking"></div>
           </section>
           <section class="results-card distance-card">
-            <div class="results-head"><div><div class="eyebrow">Метрика дистанции</div><h2>Сколько турниров требуется, чтобы занять и повторно занять место</h2>
+            <div class="results-head"><div><div class="eyebrow">Метрика дистанции</div><h2>Сколько турниров требуется для нового достижения и повторения #1</h2>
               <div class="formula-caption">Для каждого рассчитанного метода строятся две одинаково сгруппированные гистограммы: средняя дистанция в сыгранных турнирах и сумма дистанций, нормированная на общее число турниров метода.</div></div></div>
             <div class="distance-toolbar">
               <label>Top-N <input id="distanceTopN" type="number" min="1" max="500" step="1" value="${distanceTopN}"></label>
               <label>Шаг мест <input id="distanceStep" type="range" min="1" max="10" step="1" value="${distanceStep}"><output id="distanceStepValue">${distanceStep}</output></label>
             </div>
-            <details class="distance-explainer"><summary>Как считается метрика</summary><div class="notice">Для каждого игрока берётся первый полный горизонт устаревания конкретной методики и определяется лучшее достигнутое в нём место. Первая обязательная пара — число зачётных турниров игрока за этот начальный горизонт и достигнутое место. Затем считается число его турниров до каждого повторного достижения того же или более высокого места; более высокое место становится новой целью. Последний незавершённый отрезок до конца истории также включается отдельным наблюдением. В графики входят места в пределах выбранного Top-N.</div></details>
+            <details class="distance-explainer"><summary>Как считается метрика</summary><div class="notice">Первая рейтинговая позиция игрока задаёт исходное достижение и сама в пары не входит. До первого выхода на #1 пара (число сыгранных турниров; место) создаётся только при строгом улучшении личного лучшего места. Считаются турниры игрока после предыдущего достижения, включая турнир нового рекорда. После первого #1 цель фиксируется на первом месте: считаются дистанции до каждого повторного #1. Если история заканчивается раньше следующего повторения, остаток турнирной дистанции фиксируется как незавершённое наблюдение #1. Если игрок ни разу не достиг #1, незавершённый отрезок без нового личного рекорда не добавляется. В графики входят достижения в пределах выбранного Top-N.</div></details>
             <div id="distanceMetricMethods" class="distance-methods"></div>
           </section>
 

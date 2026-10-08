@@ -1,16 +1,20 @@
-# v0.29 — Comparison / ranking-distance metric
+# Ranking-distance metric — revision 2
 
-v0.29 implements the comparison metric proposed by the working group for studying how much tournament distance is required to occupy and later re-occupy a ranking position.
+The metric follows Patrick’s clarified rule and no longer uses a decay horizon to create the first observation.
 
-For each rating method the analysis uses that method's own zero-weight horizon (36 months for default MCR-2026, 24 months for default RR; presets use their configured value). For every ranked player the opening horizon produces a mandatory observation consisting of the number of the player's processed tournaments in that horizon and the best rank reached. After the opening horizon, each later return to the same or a better rank produces another observation. A better reached rank becomes the next target. The unfinished interval before the end of the history is included as the mandatory final observation.
+For each ranked player:
 
-The Comparison page groups observations by rank. `Top-N` controls the maximum position included and `step` groups positions from 1 to 10 places per bin.
+1. The first ranked position after a tournament played by that player establishes the initial personal best. It is an anchor only and does not create an observation.
+2. Before the player reaches rank #1, a pair `(player tournaments; achieved rank)` is created only when the player strictly improves the previous personal best. The distance counts that player’s processed tournaments after the previous achievement, including the tournament that sets the new best.
+3. The first achievement of rank #1 ends the improvement phase. From then on, the target remains #1. Each later return to #1 creates a repeat observation containing the tournament distance since the previous #1.
+4. If the history ends after #1 without another return, the remaining tournament distance is stored as a censored trailing observation at rank #1.
+5. If a player never reaches #1, no unfinished non-improvement interval is added at the end: before #1, observations exist strictly on personal-best improvements.
+
+`Top-N` limits the achievements shown in the charts, and `step` groups ranking places from 1 to 10 positions per bin.
 
 Two histograms are rendered for every compared method:
 
-1. `sum(tournaments to rank) / number of observations in the rank bin`;
-2. `sum(tournaments to rank) / total processed tournaments of the method`.
+1. `sum(tournament distance) / number of observations in the rank bin`;
+2. `sum(tournament distance) / total processed tournaments of the method`.
 
-All methods displayed together use a shared Y scale for the corresponding histogram, so visual comparison is not distorted by independent autoscaling.
-
-Each method card can export the pair of histograms as a standalone SVG and the aggregated bin values as CSV.
+All methods displayed together use a shared Y scale for corresponding histograms. Each method card exports the histogram pair as SVG and aggregated bin values as CSV.
