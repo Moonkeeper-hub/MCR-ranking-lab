@@ -39,6 +39,7 @@ export interface DistanceBin {
   tournamentSum: number;
   meanTournaments: number;
   normalizedByAllTournaments: number;
+  normalizedObservationsByPlayers: number;
 }
 
 export interface RankingDistanceMetric {
@@ -217,6 +218,7 @@ export function calculateRankingDistanceMetric(args: {
       tournamentSum,
       meanTournaments: sample.length ? tournamentSum / sample.length : 0,
       normalizedByAllTournaments: totalProcessedTournaments ? tournamentSum / totalProcessedTournaments : 0,
+      normalizedObservationsByPlayers: rankedPlayers.size ? sample.length / rankedPlayers.size : 0,
     });
   }
 
