@@ -42,6 +42,7 @@ export interface EvolutionState {
 }
 
 export type DoubleStrikeMode = "none" | "A" | "B";
+export type DoubleStrikeScope = "every_tournament" | "newcomers_only";
 export type SubstituteEuPolicy = "zero" | "average" | "newcomer";
 export type McrParticipantCountPolicy = "strict" | "lower" | "nearest" | "interpolate" | "skip";
 
@@ -58,6 +59,7 @@ export interface Mcr2026Config {
   decayPerQuarter: number;
   maxAgeMonths: number;
   doubleStrikeMode: DoubleStrikeMode;
+  doubleStrikeScope: DoubleStrikeScope;
   substituteEuPolicy: SubstituteEuPolicy;
   successesPerStep: number;
   failuresPerStep: number;

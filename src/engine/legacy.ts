@@ -197,6 +197,18 @@ export class Mcr2026Engine {
     for (const row of rows) {
       const state = states.get(row.player_id);
       if (!state) continue;
+
+      // Appendix 3 v0.5 default: a substitute has immutable EU=0.
+      // Alternative substitute policies remain available as laboratory
+      // experiments and keep the previous evolutionary behaviour.
+      if (row.is_substitute && this.config.substituteEuPolicy === "zero") {
+        state.eu = 0;
+        state.marks = 0;
+        state.danDate = null;
+        state.expiryPeriodsApplied = 0;
+        continue;
+      }
+
       const nr = this.normRating(row.place, row.participants);
       this.evolution.processPerformance(state, nr * kt, tournamentDate);
     }
@@ -392,14 +404,24 @@ export class Mcr2026Engine {
           : [],
       );
 
-      const doubleStrikeIds = new Set([
+      const newcomerDoubleStrikeIds = new Set([
         ...newcomerIds,
         ...substituteAsNewcomerIds,
       ]);
 
+      // Appendix 3 v0.5 default: double calculation is performed for every
+      // processed tournament. "newcomers_only" is retained as a laboratory
+      // compatibility experiment.
+      const doubleStrikeIds = this.config.doubleStrikeScope === "every_tournament"
+        ? new Set(participantIds)
+        : newcomerDoubleStrikeIds;
+
       const shouldDoubleStrike =
         this.config.doubleStrikeMode !== "none"
-        && doubleStrikeIds.size > 0;
+        && (
+          this.config.doubleStrikeScope === "every_tournament"
+          || doubleStrikeIds.size > 0
+        );
 
       const meanEuPass1 = this.meanTournamentEu(sub, states);
       const kt1 = this.tournamentCoefficient(
@@ -444,8 +466,9 @@ export class Mcr2026Engine {
         this.applyTournamentPass(sub, states, ktFinal.kt, tdate);
         this.enforceKyuPromotionCap(states, euBefore, participantIds, tdate);
       } else {
-        // Variant B: pass 2 continues from the state produced by pass 1 and
-        // may therefore award an additional layer of positive changes.
+        // Variant B (MCR-2026 default): pass 2 continues from the state
+        // produced by pass 1. Positive changes caused by the second iteration
+        // are therefore applied again, as required by Appendix 3 v0.5.
         this.applyTournamentPass(sub, states, kt1.kt, tdate);
         this.enforceKyuPromotionCap(states, euBefore, participantIds, tdate);
 

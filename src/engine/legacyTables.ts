@@ -44,7 +44,7 @@ export const KT_PARTICIPANTS: Readonly<Record<number, number>> = Object.freeze({
   84: 1.05, 88: 1.05, 92: 1.10, 96: 1.15, 100: 1.15,
   104: 1.20, 108: 1.20, 112: 1.25, 116: 1.25, 120: 1.30,
   124: 1.30, 128: 1.35, 132: 1.35, 136: 1.40, 140: 1.40,
-  144: 1.40, 148: 1.45, 152: 1.45, 156: 1.50, 164: 1.50,
+  144: 1.40, 148: 1.45, 152: 1.45, 156: 1.50, 160: 1.50, 164: 1.50,
 });
 
 export const MCR2026_AGE_WEIGHTS: readonly AgeWeight[] = Object.freeze([
@@ -75,7 +75,8 @@ export const MCR2026_DEFAULTS: Readonly<Mcr2026Config> = Object.freeze({
   statusTournamentBonus: 1.00,
   decayPerQuarter: 0.08,
   maxAgeMonths: 36,
-  doubleStrikeMode: "A",
+  doubleStrikeMode: "B",
+  doubleStrikeScope: "every_tournament",
   substituteEuPolicy: "zero",
   successesPerStep: 2,
   failuresPerStep: 2,

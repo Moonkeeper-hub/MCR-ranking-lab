@@ -999,6 +999,10 @@ function renderShell(): void {
         <option value="A" ${currentConfig.doubleStrikeMode === "A" ? "selected" : ""}>A — полный пересчёт</option>
         <option value="B" ${currentConfig.doubleStrikeMode === "B" ? "selected" : ""}>B — продолжение первой итерации</option>
       </select></label>
+      <label class="select-row"><span>Когда применять Double Strike</span><select id="doubleStrikeScope">
+        <option value="every_tournament" ${currentConfig.doubleStrikeScope === "every_tournament" ? "selected" : ""}>Каждый турнир — MCR-2026 default</option>
+        <option value="newcomers_only" ${currentConfig.doubleStrikeScope === "newcomers_only" ? "selected" : ""}>Только при появлении новичков — эксперимент</option>
+      </select></label>
       <label class="select-row"><span>EU игрока замены</span><select id="substituteEuPolicy">
         <option value="zero" ${currentConfig.substituteEuPolicy === "zero" ? "selected" : ""}>0</option>
         <option value="average" ${currentConfig.substituteEuPolicy === "average" ? "selected" : ""}>Среднее арифметическое</option>
@@ -1026,7 +1030,7 @@ function renderShell(): void {
 
   app.innerHTML = `
     <div class="app">
-      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.31.2 · TypeScript · MCR-2026 + RR + TrueSkill Tournament + Elo-PL · 2 workers · расчёт выполняется в браузере</div></div>
+      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.31.3 · TypeScript · MCR-2026 + RR + TrueSkill Tournament + Elo-PL · 2 workers · расчёт выполняется в браузере</div></div>
         <div class="topbar-actions"><div class="privacy-pill">CSV остаются на устройстве пользователя</div>
         <div class="support-wrap"><button id="supportButton" class="support-button" type="button">Donate / Support</button>
         <div id="supportPopover" class="support-popover" hidden><strong>Поддержать проект</strong><span>Перевод по номеру телефона на Сбербанк</span><div class="support-number-row"><code>+7 967 087 1525</code><button id="copySupportNumber" type="button">Копировать</button></div><span id="supportCopyStatus" class="micro"></span></div></div></div>
@@ -1116,6 +1120,7 @@ function renderShell(): void {
   document.getElementById("exportRankingCsv")?.addEventListener("click", () => { if(activeLabMethod==="rr") exportRrRankingCsv(); else if(activeLabMethod==="trueskill") exportTrueSkillCsv(); else if(activeLabMethod==="elo-pl") exportEloPlCsv(); else exportRankingCsv(); });
 
   document.getElementById("doubleStrikeMode")?.addEventListener("change", (e)=>{ currentConfig.doubleStrikeMode=(e.currentTarget as HTMLSelectElement).value as Mcr2026Config["doubleStrikeMode"]; recalc(); });
+  document.getElementById("doubleStrikeScope")?.addEventListener("change", (e)=>{ currentConfig.doubleStrikeScope=(e.currentTarget as HTMLSelectElement).value as Mcr2026Config["doubleStrikeScope"]; recalc(); });
   document.getElementById("substituteEuPolicy")?.addEventListener("change", (e)=>{ currentConfig.substituteEuPolicy=(e.currentTarget as HTMLSelectElement).value as Mcr2026Config["substituteEuPolicy"]; recalc(); });
   document.getElementById("capKyuPromotionAtFirstDan")?.addEventListener("change", (e)=>{ currentConfig.capKyuPromotionAtFirstDan=(e.currentTarget as HTMLInputElement).checked; recalc(); });
   document.getElementById("participantCountPolicy")?.addEventListener("change", (e)=>{ currentConfig.participantCountPolicy=(e.currentTarget as HTMLSelectElement).value as Mcr2026Config["participantCountPolicy"]; recalc(); });
@@ -1288,8 +1293,8 @@ const TOKEN_HELP: Record<string, { title: string; text: string; controls?: (keyo
     controls: ["successesPerStep", "failuresPerStep", "danStep"],
   },
   DoubleStrike: {
-    title: "Double Strike",
-    text: "Применяется, когда в турнире есть новичок (или игрок замены трактуется как новичок). A: первый проход только уточняет EU новичков и KT, затем весь турнир пересчитывается с исходного состояния. B: второй проход продолжает первый и может добавить ещё изменения.",
+    title: "Double Strike / двойной расчёт",
+    text: "MCR-2026 default: применяется при обработке каждого турнира. Выполняются две итерации положительных изменений; перед второй пересчитывается KT по изменившимся EU участников. Режим B применяет положительные изменения второй итерации повторно. Режимы A, «только новички» и «Нет» сохранены как лабораторные альтернативы.",
   },
   X: {
     title: "NRKTVT",
@@ -1422,6 +1427,13 @@ function renderFormulaInspector(): void {
           <option value="A" ${currentConfig.doubleStrikeMode === "A" ? "selected" : ""}>A — полный пересчёт</option>
           <option value="B" ${currentConfig.doubleStrikeMode === "B" ? "selected" : ""}>B — продолжение первой итерации</option>
         </select>
+      </label>
+      <label class="select-row inspector-switch">
+        <span>Область применения</span>
+        <select id="formulaDoubleStrikeScope">
+          <option value="every_tournament" ${currentConfig.doubleStrikeScope === "every_tournament" ? "selected" : ""}>Каждый турнир — default</option>
+          <option value="newcomers_only" ${currentConfig.doubleStrikeScope === "newcomers_only" ? "selected" : ""}>Только новички — эксперимент</option>
+        </select>
       </label>`;
   }
 
@@ -1447,6 +1459,16 @@ function renderFormulaInspector(): void {
     ds.addEventListener("change", () => {
       currentConfig.doubleStrikeMode = ds.value as Mcr2026Config["doubleStrikeMode"];
       byId<HTMLSelectElement>("doubleStrikeMode").value = ds.value;
+      recalc();
+    });
+  }
+
+  const dsScope = panel.querySelector<HTMLSelectElement>("#formulaDoubleStrikeScope");
+  if (dsScope) {
+    dsScope.addEventListener("change", () => {
+      currentConfig.doubleStrikeScope = dsScope.value as Mcr2026Config["doubleStrikeScope"];
+      const side = byId<HTMLSelectElement>("doubleStrikeScope");
+      if (side) side.value = dsScope.value;
       recalc();
     });
   }

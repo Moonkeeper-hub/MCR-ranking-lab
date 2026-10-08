@@ -88,19 +88,19 @@ export class EvolutionEngine {
   applyInactivity(state: EvolutionState, targetDate: Date): EvolutionState {
     if (state.eu < 2500 || !state.danDate) return state;
 
-    // Appendix 3 defines two milestones relative to the last successful
-    // tournament: one minus after >1 year, and one-rank demotion after >=2
-    // years (implemented as the second minus). It does not define further
-    // automatic annual demotions, so only these two periods are applied.
-    while (state.eu >= 2500 && state.expiryPeriodsApplied < 2) {
+    // Appendix 3 v0.5: one inactivity minus after >1 year from the last
+    // confirming tournament and one more for every following year. Two
+    // accumulated minuses demote one dan and the marks counter resets through
+    // normalizeMarks(). 1 dan and below are protected by the eu >= 2500 guard.
+    while (state.eu >= 2500) {
       const nextPeriod = state.expiryPeriodsApplied + 1;
       const due = addMonths(
         state.danDate,
         nextPeriod * this.config.confirmationMonths,
       );
 
-      // First milestone: strictly more than one year.
-      // Second milestone: two years or more.
+      // The first minus requires strictly more than one year. Subsequent
+      // annual milestones are charged once their anniversary is reached.
       const reached = nextPeriod === 1
         ? targetDate > due
         : targetDate >= due;
