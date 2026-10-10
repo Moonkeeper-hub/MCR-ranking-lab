@@ -35,6 +35,24 @@ export function defaultMcr2026Config(): Mcr2026Config {
   return { ...MCR2026_DEFAULTS };
 }
 
+
+/**
+ * Legacy MCR (Novikov observed).
+ *
+ * Reverse-engineered defaults from published before/after rating snapshots.
+ * This is deliberately separate from the literal Appendix 3 implementation.
+ */
+export function defaultObservedMcrConfig(): Mcr2026Config {
+  return {
+    ...MCR2026_DEFAULTS,
+    doubleStrikeMode: "A",
+    doubleStrikeScope: "newcomers_only",
+    substituteEuPolicy: "zero",
+    evolutionPolicy: "novikov_observed",
+    capKyuPromotionAtFirstDan: false,
+  };
+}
+
 export class Mcr2026Engine {
   readonly config: Mcr2026Config;
   readonly ktParticipants: Record<number, number>;
@@ -44,7 +62,7 @@ export class Mcr2026Engine {
   constructor(config: Partial<Mcr2026Config> = {}, overrides: TableOverrides = {}) {
     this.config = { ...MCR2026_DEFAULTS, ...config };
     if (Math.abs(this.config.euWeight + this.config.t5Weight - 1) > 1e-9) {
-      throw new Error("MCR-2026: euWeight + t5Weight должны быть равны 1");
+      throw new Error("Project MCR: euWeight + t5Weight должны быть равны 1");
     }
     this.ktParticipants = { ...KT_PARTICIPANTS, ...(overrides.ktParticipants ?? {}) };
     this.ageWeights = overrides.ageWeights?.map((x) => ({ ...x }));
@@ -64,10 +82,10 @@ export class Mcr2026Engine {
     if (exact !== undefined) return exact * this.config.playerCountScale;
 
     const keys = Object.keys(this.ktParticipants).map(Number).sort((a, b) => a - b);
-    if (!keys.length) throw new Error("MCR-2026: таблица KT_ЧУТ пуста");
+    if (!keys.length) throw new Error("Project MCR: таблица KT_ЧУТ пуста");
 
     if (this.config.participantCountPolicy === "strict" || this.config.participantCountPolicy === "skip") {
-      throw new Error(`MCR-2026: ЧУТ=${participants} отсутствует в нормативной таблице KT_ЧУТ`);
+      throw new Error(`Project MCR: ЧУТ=${participants} отсутствует в нормативной таблице KT_ЧУТ`);
     }
 
     const lower = [...keys].reverse().find((x) => x < participants);

@@ -137,6 +137,22 @@ export class EvolutionEngine {
     }
 
     if (before.eu <= 1750) {
+      if (this.config.evolutionPolicy === "novikov_observed" && performance >= 2000) {
+        // Observed Novikov behaviour: a kyu player first reaches D1/EU 2000.
+        // Full 500-point excess above 2000 is then converted into pluses.
+        state.eu = 2000;
+        state.marks = 0;
+        state.danDate = tournamentDate;
+        state.expiryPeriodsApplied = 0;
+        successCount = Math.max(
+          0,
+          Math.floor((performance - 2000) / this.config.danStep),
+        );
+        this.addSuccesses(state, successCount);
+        return { state, norm, successesAdded: successCount, conditionMet: true };
+      }
+
+      // Literal Appendix 3 path: keep the existing direct performed-norm behaviour.
       state.eu = norm;
       state.marks = 0;
       if (state.eu >= 2000) {
@@ -154,6 +170,12 @@ export class EvolutionEngine {
       0,
       Math.floor((performance - before.eu) / this.config.danStep),
     );
+
+    if (this.config.evolutionPolicy === "novikov_observed" && state.marks < 0) {
+      // Observed Novikov behaviour: successful confirmation clears an existing
+      // inactivity minus first; newly earned pluses are applied afterwards.
+      state.marks = 0;
+    }
 
     this.addSuccesses(state, successCount);
 

@@ -78,6 +78,7 @@ export const MCR2026_DEFAULTS: Readonly<Mcr2026Config> = Object.freeze({
   doubleStrikeMode: "B",
   doubleStrikeScope: "every_tournament",
   substituteEuPolicy: "zero",
+  evolutionPolicy: "appendix3",
   successesPerStep: 2,
   failuresPerStep: 2,
   danStep: 500,

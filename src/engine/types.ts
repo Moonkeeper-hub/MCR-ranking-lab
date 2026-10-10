@@ -44,6 +44,7 @@ export interface EvolutionState {
 export type DoubleStrikeMode = "none" | "A" | "B";
 export type DoubleStrikeScope = "every_tournament" | "newcomers_only";
 export type SubstituteEuPolicy = "zero" | "average" | "newcomer";
+export type EvolutionPolicy = "appendix3" | "novikov_observed";
 export type McrParticipantCountPolicy = "strict" | "lower" | "nearest" | "interpolate" | "skip";
 
 export interface Mcr2026Config {
@@ -61,6 +62,8 @@ export interface Mcr2026Config {
   doubleStrikeMode: DoubleStrikeMode;
   doubleStrikeScope: DoubleStrikeScope;
   substituteEuPolicy: SubstituteEuPolicy;
+  /** Rank-evolution semantics: literal Appendix 3 or reverse-engineered Novikov behaviour. */
+  evolutionPolicy: EvolutionPolicy;
   successesPerStep: number;
   failuresPerStep: number;
   danStep: number;

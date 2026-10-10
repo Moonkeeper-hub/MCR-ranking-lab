@@ -2,7 +2,7 @@
 import "./styles.css";
 import "katex/dist/katex.min.css";
 import { renderMcr2026Math, renderRrMath, renderTrueSkillTournamentMath, renderEloPlMath } from "./ui/formulas";
-import { defaultMcr2026Config } from "./engine/legacy";
+import { defaultMcr2026Config, defaultObservedMcrConfig } from "./engine/legacy";
 import {
   defaultRrConfig, RR_DEFAULT_PLAYER_BANDS, RR_DEFAULT_SESSION_BANDS,
   RR_DEFAULT_TYPE_MULTIPLIERS, RR_DEFAULT_SPECIAL_COEFFICIENTS,
@@ -35,13 +35,16 @@ const app = document.querySelector<HTMLDivElement>("#app")!;
 
 let players: PlayerInput[] = [];
 let results: ResultInput[] = [];
-let currentConfig: Mcr2026Config = defaultMcr2026Config();
+let projectMcrConfig: Mcr2026Config = defaultMcr2026Config();
+let observedMcrConfig: Mcr2026Config = defaultObservedMcrConfig();
+let currentConfig: Mcr2026Config = projectMcrConfig;
 let ktExperiment: Record<number, number> = { ...KT_PARTICIPANTS };
 let vtExperiment = MCR2026_AGE_WEIGHTS.map((x) => ({ ...x }));
 let useKtExperiment = false;
 let useVtExperiment = false;
 let current: CalculationResult | null = null;
 let reference: CalculationResult | null = null;
+let observedReference: CalculationResult | null = null;
 let rrConfig: RrConfig = defaultRrConfig();
 let rrPlayerBands: RrRangeBand[] = RR_DEFAULT_PLAYER_BANDS.map((x) => ({ ...x }));
 let rrSessionBands: RrRangeBand[] = RR_DEFAULT_SESSION_BANDS.map((x) => ({ ...x }));
@@ -62,9 +65,26 @@ let evaluationDateState = todayIso();
 let activeFormulaToken: string | null = null;
 let activeRrFormulaToken: string | null = null;
 let activeReferenceTab = 0;
-type LabMethod = "mcr" | "rr" | "trueskill" | "elo-pl";
+type LabMethod = "mcr" | "mcr-observed" | "rr" | "trueskill" | "elo-pl";
 let activeLabMethod: LabMethod = "mcr";
 let comparisonPresetId = "";
+
+function isMcrLabMethod(method: LabMethod = activeLabMethod): boolean {
+  return method === "mcr" || method === "mcr-observed";
+}
+
+function configForMcrMethod(method: LabMethod): Mcr2026Config {
+  return method === "mcr-observed" ? observedMcrConfig : projectMcrConfig;
+}
+
+function storeActiveMcrConfig(): void {
+  if (activeLabMethod === "mcr-observed") observedMcrConfig = currentConfig;
+  else if (activeLabMethod === "mcr") projectMcrConfig = currentConfig;
+}
+
+function activeMcrReference(): CalculationResult | null {
+  return activeLabMethod === "mcr-observed" ? observedReference : reference;
+}
 
 type RankingSortKey =
   | "rank"
@@ -289,8 +309,8 @@ function storePresets(items: SavedLabPreset[]): void {
 
 function captureCurrentPreset(name: string): SavedLabPreset {
   const id = `preset-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  if (activeLabMethod === "mcr") {
-    return { id, name, method: "mcr", savedAt: new Date().toISOString(), payload: {
+  if (isMcrLabMethod(activeLabMethod)) {
+    return { id, name, method: activeLabMethod, savedAt: new Date().toISOString(), payload: {
       config: { ...currentConfig },
       useKtExperiment, useVtExperiment,
       ktExperiment: { ...ktExperiment },
@@ -310,8 +330,13 @@ function captureCurrentPreset(name: string): SavedLabPreset {
 
 function applyPreset(preset: SavedLabPreset): void {
   activeLabMethod = preset.method;
-  if (preset.method === "mcr") {
-    currentConfig = { ...defaultMcr2026Config(), ...(preset.payload?.config ?? {}) };
+  if (isMcrLabMethod(preset.method)) {
+    currentConfig = {
+      ...(preset.method === "mcr-observed" ? defaultObservedMcrConfig() : defaultMcr2026Config()),
+      ...(preset.payload?.config ?? {}),
+    };
+    if (preset.method === "mcr-observed") observedMcrConfig = currentConfig;
+    else projectMcrConfig = currentConfig;
     useKtExperiment = Boolean(preset.payload?.useKtExperiment);
     useVtExperiment = Boolean(preset.payload?.useVtExperiment);
     ktExperiment = { ...KT_PARTICIPANTS, ...(preset.payload?.ktExperiment ?? {}) };
@@ -373,6 +398,7 @@ async function recalc(): Promise<void> {
   const jobs = await Promise.allSettled([
     calculateMcrCachedAsync(currentConfig, overrides, evaluationDate),
     calculateMcrCachedAsync(defaultMcr2026Config(), {}, evaluationDate),
+    calculateMcrCachedAsync(defaultObservedMcrConfig(), {}, evaluationDate),
     calculateRrCachedAsync(rrConfig, rrOverrides, evaluationDate),
     calculateRrCachedAsync(defaultRrConfig(), rrDefaultOverrides, evaluationDate),
     calculateTrueSkillCachedAsync(trueSkillConfig, evaluationDate),
@@ -388,13 +414,14 @@ async function recalc(): Promise<void> {
     return null;
   };
   current = assign(jobs[0] as PromiseSettledResult<CalculationResult>, "MCR lab");
-  reference = assign(jobs[1] as PromiseSettledResult<CalculationResult>, "MCR-2026 default");
-  rrCurrent = assign(jobs[2] as PromiseSettledResult<RrCalculationResult>, "RR lab");
-  rrReference = assign(jobs[3] as PromiseSettledResult<RrCalculationResult>, "RR default");
-  trueSkillCurrent = assign(jobs[4] as PromiseSettledResult<TrueSkillTournamentResult>, "TrueSkill Tournament lab");
-  trueSkillReference = assign(jobs[5] as PromiseSettledResult<TrueSkillTournamentResult>, "TrueSkill Tournament default");
-  eloPlCurrent = assign(jobs[6] as PromiseSettledResult<EloPlResult>, "Elo-PL lab");
-  eloPlReference = assign(jobs[7] as PromiseSettledResult<EloPlResult>, "Elo-PL default");
+  reference = assign(jobs[1] as PromiseSettledResult<CalculationResult>, "Проектный MCR default");
+  observedReference = assign(jobs[2] as PromiseSettledResult<CalculationResult>, "Legacy MCR observed default");
+  rrCurrent = assign(jobs[3] as PromiseSettledResult<RrCalculationResult>, "RR lab");
+  rrReference = assign(jobs[4] as PromiseSettledResult<RrCalculationResult>, "RR default");
+  trueSkillCurrent = assign(jobs[5] as PromiseSettledResult<TrueSkillTournamentResult>, "TrueSkill Tournament lab");
+  trueSkillReference = assign(jobs[6] as PromiseSettledResult<TrueSkillTournamentResult>, "TrueSkill Tournament default");
+  eloPlCurrent = assign(jobs[7] as PromiseSettledResult<EloPlResult>, "Elo-PL lab");
+  eloPlReference = assign(jobs[8] as PromiseSettledResult<EloPlResult>, "Elo-PL default");
 
   // Selected comparison preset is warmed in the same two-worker queues so the
   // comparison renderer never has to start a cold calculation on the UI thread.
@@ -413,13 +440,16 @@ async function recalc(): Promise<void> {
 
   const visibleResults = results.filter((r) => String(r.tournament_date) <= evaluationDate).length;
   const mcrText = reference
-    ? `MCR ${reference.isComplete === false ? "⚠ неполный" : "✓"}: ${reference.ranking.length}`
-    : "MCR ✕";
+    ? `Project MCR ${reference.isComplete === false ? "⚠ неполный" : "✓"}: ${reference.ranking.length}`
+    : "Project MCR ✕";
+  const observedText = observedReference
+    ? `Legacy observed ${observedReference.isComplete === false ? "⚠ неполный" : "✓"}: ${observedReference.ranking.length}`
+    : "Legacy observed ✕";
   const rrText = rrReference ? `RR ✓: ${rrReference.ranking.length}` : "RR ✕";
   const tsText = trueSkillReference ? `TS ✓: ${trueSkillReference.ranking.length}` : "TS ✕";
   const plText = eloPlReference ? `Elo-PL ✓: ${eloPlReference.ranking.length}` : "Elo-PL ✕";
   const detail = errors.length ? ` · ${errors.join(" · ")}` : "";
-  setStatus(`Срез ${evaluationDate}: ${visibleResults} результатов · ${mcrText} · ${rrText} · ${tsText} · ${plText}${detail}`, errors.length === 0);
+  setStatus(`Срез ${evaluationDate}: ${visibleResults} результатов · ${mcrText} · ${observedText} · ${rrText} · ${tsText} · ${plText}${detail}`, errors.length === 0);
 }
 
 function setStatus(text: string, ok = true): void {
@@ -680,11 +710,12 @@ function bindRrControls(): void {
 
 async function warmSavedPreset(preset: SavedLabPreset, evaluationDate: string): Promise<void> {
   const payload = preset.payload ?? {};
-  if (preset.method === "mcr") {
+  if (isMcrLabMethod(preset.method)) {
     const overrides: TableOverrides = {};
     if (payload.useKtExperiment) overrides.ktParticipants = payload.ktExperiment;
     if (payload.useVtExperiment) overrides.ageWeights = payload.vtExperiment;
-    await calculateMcrCachedAsync({ ...defaultMcr2026Config(), ...(payload.config ?? {}) }, overrides, evaluationDate);
+    const base = preset.method === "mcr-observed" ? defaultObservedMcrConfig() : defaultMcr2026Config();
+    await calculateMcrCachedAsync({ ...base, ...(payload.config ?? {}) }, overrides, evaluationDate);
     return;
   }
   if (preset.method === "rr") {
@@ -701,12 +732,13 @@ async function warmSavedPreset(preset: SavedLabPreset, evaluationDate: string): 
 
 function calculateSavedPreset(preset: SavedLabPreset, evaluationDate: string): { name: string; method: string; ranking: Array<{playerId:string; playerName:string; rank:number; rating:number}> } | null {
   const payload = preset.payload ?? {};
-  if (preset.method === "mcr") {
+  if (isMcrLabMethod(preset.method)) {
     const overrides: TableOverrides = {};
     if (payload.useKtExperiment) overrides.ktParticipants = payload.ktExperiment;
     if (payload.useVtExperiment) overrides.ageWeights = payload.vtExperiment;
-    const result = getMcrCached({ ...defaultMcr2026Config(), ...(payload.config ?? {}) }, overrides, evaluationDate);
-    return result ? { name: preset.name, method: "MCR", ranking: result.ranking.map((x) => ({ playerId:x.playerId, playerName:x.playerName, rank:x.rank, rating:x.rating })) } : null;
+    const base = preset.method === "mcr-observed" ? defaultObservedMcrConfig() : defaultMcr2026Config();
+    const result = getMcrCached({ ...base, ...(payload.config ?? {}) }, overrides, evaluationDate);
+    return result ? { name: preset.name, method: labMethodName(preset.method), ranking: result.ranking.map((x) => ({ playerId:x.playerId, playerName:x.playerName, rank:x.rank, rating:x.rating })) } : null;
   }
   if (preset.method === "rr") {
     const result = getRrCached({ ...defaultRrConfig(), ...(payload.config ?? {}) }, {
@@ -734,7 +766,7 @@ function diagnosticSummaryHtml(title: string, result: { diagnostics?: any[]; isC
   const cls = incomplete ? "error" : diagnostics.length ? "warn" : "good";
   const state = incomplete ? "⚠ Неполный расчёт" : diagnostics.length ? "⚠ Есть исключённые/адаптированные турниры" : "✓ Данные совместимы";
   const rows = [...groups.entries()].slice(0, 6).map(([message, count]) => `<li>${esc(message)}${count > 1 ? ` × ${count}` : ""}</li>`).join("");
-  return `<div class="method-validation ${cls}"><div><strong>${esc(title)}</strong><span>${state}</span></div><div class="micro">Обработано турниров: ${result.processedTournamentCount ?? "—"}${result.skippedTournamentCount ? ` · пропущено: ${result.skippedTournamentCount}` : ""}</div>${rows ? `<ul>${rows}</ul>` : ""}${kind === "mcr" && incomplete ? `<div class="micro">Канонический MCR-2026 не интерполирует отсутствующие ЧУТ. В Лаборатории можно выбрать другой режим обработки и сохранить его как пользовательский preset.</div>` : ""}</div>`;
+  return `<div class="method-validation ${cls}"><div><strong>${esc(title)}</strong><span>${state}</span></div><div class="micro">Обработано турниров: ${result.processedTournamentCount ?? "—"}${result.skippedTournamentCount ? ` · пропущено: ${result.skippedTournamentCount}` : ""}</div>${rows ? `<ul>${rows}</ul>` : ""}${kind === "mcr" && incomplete ? `<div class="micro">MCR strict-режим не интерполирует отсутствующие ЧУТ. В Лаборатории можно выбрать другой режим обработки и сохранить его как пользовательский preset.</div>` : ""}</div>`;
 }
 
 function comparisonSortHeader(label: string, key: string): string {
@@ -744,11 +776,11 @@ function comparisonSortHeader(label: string, key: string): string {
 }
 
 function exportComparisonCsv(rows: any[], presetResult: any | null): void {
-  const header = ["player_id","player_name","mcr_rank","rr_rank","trueskill_rank","elo_pl_rank","delta_rr_minus_mcr","delta_trueskill_minus_mcr","delta_elo_pl_minus_mcr","mcr_rating","rr_rating","trueskill_rating","elo_pl_rating"];
-  if (presetResult) header.push("preset_name","preset_rank","delta_preset_minus_mcr","preset_rating");
+  const header = ["player_id","player_name","project_mcr_rank","legacy_observed_rank","rr_rank","trueskill_rank","elo_pl_rank","delta_observed_minus_project","delta_rr_minus_project","delta_trueskill_minus_project","delta_elo_pl_minus_project","project_mcr_rating","legacy_observed_rating","rr_rating","trueskill_rating","elo_pl_rating"];
+  if (presetResult) header.push("preset_name","preset_rank","delta_preset_minus_project","preset_rating");
   const lines=[header.map(csvCell).join(",")];
   for(const x of rows){
-    const row:unknown[]=[x.playerId,x.playerName,x.mcrRank??"",x.rrRank??"",x.tsRank??"",x.eloRank??"",x.deltaRr??"",x.deltaTs??"",x.deltaElo??"",x.mcrRating??"",x.rrRating??"",x.tsRating??"",x.eloRating??""];
+    const row:unknown[]=[x.playerId,x.playerName,x.mcrRank??"",x.observedRank??"",x.rrRank??"",x.tsRank??"",x.eloRank??"",x.deltaObserved??"",x.deltaRr??"",x.deltaTs??"",x.deltaElo??"",x.mcrRating??"",x.observedRating??"",x.rrRating??"",x.tsRating??"",x.eloRating??""];
     if(presetResult)row.push(presetResult.name,x.presetRank??"",x.deltaPreset??"",x.presetRating??"");
     lines.push(row.map(csvCell).join(","));
   }
@@ -766,19 +798,20 @@ function renderComparison(): void {
   const selectedPreset=comparisonPresetId?presets.find(p=>p.id===comparisonPresetId):undefined;
   const presetResult=selectedPreset?calculateSavedPreset(selectedPreset,evaluationDate):null;
   const mcrById=new Map((reference?.ranking??[]).map(x=>[x.playerId,x]));
+  const observedById=new Map((observedReference?.ranking??[]).map(x=>[x.playerId,x]));
   const rrById=new Map((rrReference?.ranking??[]).map(x=>[x.playerId,x]));
   const tsById=new Map((trueSkillReference?.ranking??[]).map(x=>[x.playerId,x]));
   const eloById=new Map((eloPlReference?.ranking??[]).map(x=>[x.playerId,x]));
   const presetById=new Map((presetResult?.ranking??[]).map(x=>[x.playerId,x]));
-  const ids=new Set([...mcrById.keys(),...rrById.keys(),...tsById.keys(),...eloById.keys(),...presetById.keys()]);
-  let rows=[...ids].map(playerId=>{const m=mcrById.get(playerId),r=rrById.get(playerId),t=tsById.get(playerId),e=eloById.get(playerId),p=presetById.get(playerId);const mRank=m?.rank??null;return{playerId,playerName:m?.playerName??r?.playerName??t?.playerName??e?.playerName??p?.playerName??playerId,mcrRank:mRank,rrRank:r?.rank??null,tsRank:t?.rank??null,eloRank:e?.rank??null,presetRank:p?.rank??null,mcrRating:m?.rating??null,rrRating:r?.rating??null,tsRating:t?.rating??null,eloRating:e?.rating??null,presetRating:p?.rating??null,deltaRr:m&&r?m.rank-r.rank:null,deltaTs:m&&t?m.rank-t.rank:null,deltaElo:m&&e?m.rank-e.rank:null,deltaPreset:m&&p?m.rank-p.rank:null};});
+  const ids=new Set([...mcrById.keys(),...observedById.keys(),...rrById.keys(),...tsById.keys(),...eloById.keys(),...presetById.keys()]);
+  let rows=[...ids].map(playerId=>{const m=mcrById.get(playerId),o=observedById.get(playerId),r=rrById.get(playerId),t=tsById.get(playerId),e=eloById.get(playerId),p=presetById.get(playerId);const mRank=m?.rank??null;return{playerId,playerName:m?.playerName??o?.playerName??r?.playerName??t?.playerName??e?.playerName??p?.playerName??playerId,mcrRank:mRank,observedRank:o?.rank??null,rrRank:r?.rank??null,tsRank:t?.rank??null,eloRank:e?.rank??null,presetRank:p?.rank??null,mcrRating:m?.rating??null,observedRating:o?.rating??null,rrRating:r?.rating??null,tsRating:t?.rating??null,eloRating:e?.rating??null,presetRating:p?.rating??null,deltaObserved:m&&o?m.rank-o.rank:null,deltaRr:m&&r?m.rank-r.rank:null,deltaTs:m&&t?m.rank-t.rank:null,deltaElo:m&&e?m.rank-e.rank:null,deltaPreset:m&&p?m.rank-p.rank:null};});
   rows.sort((a:any,b:any)=>{const av=a[comparisonSortKey],bv=b[comparisonSortKey];if(av===null||av===undefined)return 1;if(bv===null||bv===undefined)return-1;const cmp=typeof av==="string"?String(av).localeCompare(String(bv),"ru"):Number(av)-Number(bv);return comparisonSortDir==="asc"?cmp:-cmp;});
-  const sharedRr=rows.filter(x=>x.mcrRank!==null&&x.rrRank!==null);const sharedTs=rows.filter(x=>x.mcrRank!==null&&x.tsRank!==null);const sharedElo=rows.filter(x=>x.mcrRank!==null&&x.eloRank!==null);
+  const sharedObserved=rows.filter(x=>x.mcrRank!==null&&x.observedRank!==null);const sharedRr=rows.filter(x=>x.mcrRank!==null&&x.rrRank!==null);const sharedTs=rows.filter(x=>x.mcrRank!==null&&x.tsRank!==null);const sharedElo=rows.filter(x=>x.mcrRank!==null&&x.eloRank!==null);
   const mean=(xs:any[],key:string)=>xs.length?xs.reduce((a,x)=>a+Math.abs(Number(x[key]??0)),0)/xs.length:NaN;
-  metrics.innerHTML=`<div><span>MCR-2026</span><strong>${reference?.ranking.length??"—"}</strong></div><div><span>RR</span><strong>${rrReference?.ranking.length??"—"}</strong></div><div><span>TrueSkill Tournament</span><strong>${trueSkillReference?.ranking.length??"—"}</strong></div><div><span>Elo-PL</span><strong>${eloPlReference?.ranking.length??"—"}</strong></div><div><span>|Δ| RR↔MCR</span><strong>${Number.isFinite(mean(sharedRr,"deltaRr"))?fmt(mean(sharedRr,"deltaRr"),1):"—"}</strong></div><div><span>|Δ| TS↔MCR</span><strong>${Number.isFinite(mean(sharedTs,"deltaTs"))?fmt(mean(sharedTs,"deltaTs"),1):"—"}</strong></div><div><span>|Δ| Elo↔MCR</span><strong>${Number.isFinite(mean(sharedElo,"deltaElo"))?fmt(mean(sharedElo,"deltaElo"),1):"—"}</strong></div>`;
-  const validationHtml=`<div class="method-validation-grid">${diagnosticSummaryHtml("MCR-2026 default",reference,"mcr")}${diagnosticSummaryHtml("RR default",rrReference,"rr")}${diagnosticSummaryHtml("TrueSkill Tournament default",trueSkillReference,"trueskill")}${diagnosticSummaryHtml("Elo-PL default",eloPlReference,"elo-pl")}</div>`;
-  const presetHeaders=presetResult?`<th>${comparisonSortHeader(`${presetResult.name} #`,"presetRank")}</th><th>Δ preset−MCR</th>`:"";
-  host.innerHTML=`${validationHtml}<div class="ranking-toolbar"><div class="micro">${rows.length} игроков</div><button id="exportComparisonCsv" class="download-button" type="button">↓ CSV</button></div><div class="table-wrap ranking-wrap"><table class="ranking-table comparison-table"><thead><tr><th>${comparisonSortHeader("Игрок","playerName")}</th><th>${comparisonSortHeader("MCR #","mcrRank")}</th><th>${comparisonSortHeader("RR #","rrRank")}</th><th>${comparisonSortHeader("TS #","tsRank")}</th><th>${comparisonSortHeader("Elo-PL #","eloRank")}</th><th>Δ RR−MCR</th><th>Δ TS−MCR</th><th>Δ Elo−MCR</th>${presetHeaders}</tr></thead><tbody>${rows.map((x:any)=>`<tr><td>${esc(x.playerName)}</td><td>${x.mcrRank??"—"}</td><td>${x.rrRank??"—"}</td><td>${x.tsRank??"—"}</td><td>${x.eloRank??"—"}</td><td>${x.deltaRr===null?"—":`${x.deltaRr>=0?"+":""}${x.deltaRr}`}</td><td>${x.deltaTs===null?"—":`${x.deltaTs>=0?"+":""}${x.deltaTs}`}</td><td>${x.deltaElo===null?"—":`${x.deltaElo>=0?"+":""}${x.deltaElo}`}</td>${presetResult?`<td>${x.presetRank??"—"}</td><td>${x.deltaPreset===null?"—":`${x.deltaPreset>=0?"+":""}${x.deltaPreset}`}</td>`:""}</tr>`).join("")}</tbody></table></div>`;
+  metrics.innerHTML=`<div><span>Проектный MCR</span><strong>${reference?.ranking.length??"—"}</strong></div><div><span>Legacy observed</span><strong>${observedReference?.ranking.length??"—"}</strong></div><div><span>RR</span><strong>${rrReference?.ranking.length??"—"}</strong></div><div><span>TrueSkill Tournament</span><strong>${trueSkillReference?.ranking.length??"—"}</strong></div><div><span>Elo-PL</span><strong>${eloPlReference?.ranking.length??"—"}</strong></div><div><span>|Δ| observed↔project</span><strong>${Number.isFinite(mean(sharedObserved,"deltaObserved"))?fmt(mean(sharedObserved,"deltaObserved"),1):"—"}</strong></div><div><span>|Δ| RR↔project</span><strong>${Number.isFinite(mean(sharedRr,"deltaRr"))?fmt(mean(sharedRr,"deltaRr"),1):"—"}</strong></div><div><span>|Δ| TS↔project</span><strong>${Number.isFinite(mean(sharedTs,"deltaTs"))?fmt(mean(sharedTs,"deltaTs"),1):"—"}</strong></div><div><span>|Δ| Elo↔project</span><strong>${Number.isFinite(mean(sharedElo,"deltaElo"))?fmt(mean(sharedElo,"deltaElo"),1):"—"}</strong></div>`;
+  const validationHtml=`<div class="method-validation-grid">${diagnosticSummaryHtml("Проектный MCR (Приложение 3)",reference,"mcr")}${diagnosticSummaryHtml("Legacy MCR (Новиков observed)",observedReference,"mcr")}${diagnosticSummaryHtml("RR default",rrReference,"rr")}${diagnosticSummaryHtml("TrueSkill Tournament default",trueSkillReference,"trueskill")}${diagnosticSummaryHtml("Elo-PL default",eloPlReference,"elo-pl")}</div>`;
+  const presetHeaders=presetResult?`<th>${comparisonSortHeader(`${presetResult.name} #`,"presetRank")}</th><th>Δ preset−project</th>`:"";
+  host.innerHTML=`${validationHtml}<div class="ranking-toolbar"><div class="micro">${rows.length} игроков</div><button id="exportComparisonCsv" class="download-button" type="button">↓ CSV</button></div><div class="table-wrap ranking-wrap"><table class="ranking-table comparison-table"><thead><tr><th>${comparisonSortHeader("Игрок","playerName")}</th><th>${comparisonSortHeader("Project #","mcrRank")}</th><th>${comparisonSortHeader("Observed #","observedRank")}</th><th>${comparisonSortHeader("RR #","rrRank")}</th><th>${comparisonSortHeader("TS #","tsRank")}</th><th>${comparisonSortHeader("Elo-PL #","eloRank")}</th><th>Δ Obs−Proj</th><th>Δ RR−Proj</th><th>Δ TS−Proj</th><th>Δ Elo−Proj</th>${presetHeaders}</tr></thead><tbody>${rows.map((x:any)=>`<tr><td>${esc(x.playerName)}</td><td>${x.mcrRank??"—"}</td><td>${x.observedRank??"—"}</td><td>${x.rrRank??"—"}</td><td>${x.tsRank??"—"}</td><td>${x.eloRank??"—"}</td><td>${x.deltaObserved===null?"—":`${x.deltaObserved>=0?"+":""}${x.deltaObserved}`}</td><td>${x.deltaRr===null?"—":`${x.deltaRr>=0?"+":""}${x.deltaRr}`}</td><td>${x.deltaTs===null?"—":`${x.deltaTs>=0?"+":""}${x.deltaTs}`}</td><td>${x.deltaElo===null?"—":`${x.deltaElo>=0?"+":""}${x.deltaElo}`}</td>${presetResult?`<td>${x.presetRank??"—"}</td><td>${x.deltaPreset===null?"—":`${x.deltaPreset>=0?"+":""}${x.deltaPreset}`}</td>`:""}</tr>`).join("")}</tbody></table></div>`;
   host.querySelectorAll<HTMLButtonElement>("[data-comparison-sort]").forEach(button=>button.onclick=()=>{const key=button.dataset.comparisonSort!;if(comparisonSortKey===key)comparisonSortDir=comparisonSortDir==="asc"?"desc":"asc";else{comparisonSortKey=key;comparisonSortDir="asc";}renderComparison();});
   host.querySelector<HTMLButtonElement>("#exportComparisonCsv")?.addEventListener("click",()=>exportComparisonCsv(rows,presetResult));
   renderDistanceMetrics();
@@ -786,7 +819,7 @@ function renderComparison(): void {
 
 function distanceHorizonMonths(methodId: string): number {
   const option = historyMethodOptions().find((x) => x.id === methodId);
-  if (!option || option.method === "mcr") {
+  if (!option || isMcrLabMethod(option.method)) {
     const config = option?.preset?.payload?.config ?? {};
     return Number(config.maxAgeMonths ?? defaultMcr2026Config().maxAgeMonths);
   }
@@ -905,7 +938,7 @@ function ensureDistanceHistories(methodIds: string[]): void {
 function renderDistanceMetrics(): void {
   const host = document.querySelector<HTMLDivElement>("#distanceMetricMethods");
   if (!host) return;
-  const methodIds = ["mcr-default", "rr-default", "trueskill-default", "elo-pl-default"];
+  const methodIds = ["mcr-default", "mcr-observed-default", "rr-default", "trueskill-default", "elo-pl-default"];
   if (comparisonPresetId) methodIds.push(`preset:${comparisonPresetId}`);
   const uniqueIds = [...new Set(methodIds)].filter((id) => historyMethodOptions().some((option) => option.id === id));
   if (!players.length || !results.length) {
@@ -962,19 +995,21 @@ function renderDistanceMetrics(): void {
 }
 
 function labMethodName(method: LabMethod = activeLabMethod): string {
-  if (method === "mcr") return "MCR-2026";
+  if (method === "mcr") return "Проектный MCR (Приложение 3)";
+  if (method === "mcr-observed") return "Legacy MCR (Новиков observed)";
   if (method === "rr") return "RR";
   if (method === "trueskill") return "TrueSkill Tournament";
   return "Elo-PL";
 }
 function labMethodCaption(method: LabMethod = activeLabMethod): string {
-  if (method === "mcr") return "Основная формула и её компоненты";
+  if (method === "mcr") return "Буквальная реализация проектного Приложения 3 v0.5";
+  if (method === "mcr-observed") return "Реверс-инжиниринг опубликованных рейтингов Новикова";
   if (method === "rr") return "Внутренний российский рейтинг: две части A и B";
   if (method === "trueskill") return "Один турнир = одно multiplayer-наблюдение; состояние игрока задаётся μ и σ";
   return "Plackett–Luce likelihood по полному порядку мест и Elo-подобное обновление";
 }
 function renderActiveFormula(): string {
-  if (activeLabMethod === "mcr") return renderMcr2026Math(currentConfig);
+  if (isMcrLabMethod(activeLabMethod)) return renderMcr2026Math(currentConfig);
   if (activeLabMethod === "rr") return renderRrMath(rrConfig);
   if (activeLabMethod === "trueskill") return renderTrueSkillTournamentMath(trueSkillConfig);
   return renderEloPlMath(eloPlConfig);
@@ -1009,8 +1044,8 @@ function renderShell(): void {
         <option value="B" ${currentConfig.doubleStrikeMode === "B" ? "selected" : ""}>B — продолжение первой итерации</option>
       </select></label>
       <label class="select-row"><span>Когда применять Double Strike</span><select id="doubleStrikeScope">
-        <option value="every_tournament" ${currentConfig.doubleStrikeScope === "every_tournament" ? "selected" : ""}>Каждый турнир — MCR-2026 default</option>
-        <option value="newcomers_only" ${currentConfig.doubleStrikeScope === "newcomers_only" ? "selected" : ""}>Только при появлении новичков — эксперимент</option>
+        <option value="every_tournament" ${currentConfig.doubleStrikeScope === "every_tournament" ? "selected" : ""}>Каждый турнир — проектный default</option>
+        <option value="newcomers_only" ${currentConfig.doubleStrikeScope === "newcomers_only" ? "selected" : ""}>Только при появлении новичков — observed default</option>
       </select></label>
       <label class="select-row"><span>EU игрока замены</span><select id="substituteEuPolicy">
         <option value="zero" ${currentConfig.substituteEuPolicy === "zero" ? "selected" : ""}>0</option>
@@ -1035,11 +1070,11 @@ function renderShell(): void {
     <details class="side-section" open><summary>Plackett–Luce / Elo</summary><div class="section-body">${ELO_CONTROL_DEFS.slice(0,3).map(eloControlHtml).join("")}</div></details>
     <details class="side-section" open><summary>Множители K</summary><div class="section-body">${ELO_CONTROL_DEFS.slice(3).map(eloControlHtml).join("")}</div></details>
     <details class="side-section"><summary>Отображение</summary><div class="section-body"><label class="select-row"><span>Нормализация</span><select data-elo-normalization><option value="off" ${eloPlConfig.normalization==="off"?"selected":""}>Off</option><option value="0-1000" ${eloPlConfig.normalization==="0-1000"?"selected":""}>0–1000</option><option value="0-3000" ${eloPlConfig.normalization==="0-3000"?"selected":""}>0–3000</option></select></label></div></details>`;
-  const methodControls = activeLabMethod === "mcr" ? mcrControls : activeLabMethod === "rr" ? rrControls : activeLabMethod === "trueskill" ? trueSkillControls : eloControls;
+  const methodControls = isMcrLabMethod(activeLabMethod) ? mcrControls : activeLabMethod === "rr" ? rrControls : activeLabMethod === "trueskill" ? trueSkillControls : eloControls;
 
   app.innerHTML = `
     <div class="app">
-      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.31.4 · TypeScript · MCR-2026 + RR + TrueSkill Tournament + Elo-PL · 2 workers · расчёт выполняется в браузере</div></div>
+      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.31.5 · TypeScript · Project MCR + Legacy MCR observed + RR + TrueSkill Tournament + Elo-PL · 2 workers · расчёт выполняется в браузере</div></div>
         <div class="topbar-actions"><div class="privacy-pill">CSV остаются на устройстве пользователя</div>
         <div class="support-wrap"><button id="supportButton" class="support-button" type="button">Donate / Support</button>
         <div id="supportPopover" class="support-popover" hidden><strong>Поддержать проект</strong><span>Перевод по номеру телефона на Сбербанк</span><div class="support-number-row"><code>+7 967 087 1525</code><button id="copySupportNumber" type="button">Копировать</button></div><span id="supportCopyStatus" class="micro"></span></div></div></div>
@@ -1054,7 +1089,7 @@ function renderShell(): void {
       <section id="comparisonWorkspace" class="workspace-panel ${activeWorkspace === "comparison" ? "active" : ""} comparison-workspace">
         <main class="main comparison-main">
           <section class="results-card">
-            <div class="results-head"><div><div class="eyebrow">Сравнение методик</div><h2>MCR-2026 · RR · TrueSkill Tournament · Elo-PL</h2>
+            <div class="results-head"><div><div class="eyebrow">Сравнение методик</div><h2>Проектный MCR · Legacy MCR observed · RR · TrueSkill Tournament · Elo-PL</h2>
               <div class="reference-labels"><span>Один dataset</span><span>сравниваем позиции, а не абсолютные шкалы</span></div></div><div id="comparisonMetrics" class="metrics-strip"></div></div>
             <div class="comparison-toolbar"><label>Пользовательский пресет <select id="comparisonPresetSelect"><option value="">Без пользовательского пресета</option></select></label></div>
             <div id="comparisonRanking"></div>
@@ -1085,7 +1120,7 @@ function renderShell(): void {
         <aside class="sidebar"><section class="side-card">
           <div class="side-title">Лаборатория методик</div>
           <div class="section-body compact-stack method-picker">
-            <label class="select-row"><span>Методика</span><select id="labMethodSelect"><option value="mcr" ${activeLabMethod === "mcr" ? "selected" : ""}>MCR-2026</option><option value="rr" ${activeLabMethod === "rr" ? "selected" : ""}>RR</option><option value="trueskill" ${activeLabMethod === "trueskill" ? "selected" : ""}>TrueSkill Tournament</option><option value="elo-pl" ${activeLabMethod === "elo-pl" ? "selected" : ""}>Elo-PL</option></select></label>
+            <label class="select-row"><span>Методика</span><select id="labMethodSelect"><option value="mcr" ${activeLabMethod === "mcr" ? "selected" : ""}>Проектный MCR (Приложение 3)</option><option value="mcr-observed" ${activeLabMethod === "mcr-observed" ? "selected" : ""}>Legacy MCR (Новиков observed)</option><option value="rr" ${activeLabMethod === "rr" ? "selected" : ""}>RR</option><option value="trueskill" ${activeLabMethod === "trueskill" ? "selected" : ""}>TrueSkill Tournament</option><option value="elo-pl" ${activeLabMethod === "elo-pl" ? "selected" : ""}>Elo-PL</option></select></label>
             <div class="preset-box"><label>Сохранённый пресет<select id="labPresetSelect"><option value="">— выбрать —</option>${presets.map((p)=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label>
             <div class="preset-save-row"><input id="presetName" type="text" placeholder="Название пресета"><button id="savePreset" type="button">Сохранить</button><button id="deletePreset" type="button">Удалить</button></div></div>
           </div>
@@ -1099,7 +1134,7 @@ function renderShell(): void {
             <div id="legacyFormulaMount" class="legacy-formula-mount">${renderActiveFormula()}</div>
             <div class="formula-hint">Нажмите на коэффициент или обозначение — ниже появятся пояснение и связанные редактируемые параметры.</div><div id="formulaInspector" class="formula-inspector"></div>
           </section>
-          ${activeLabMethod === "mcr" ? `<details class="reference-card"><summary><span>Справочники MCR-2026 — посмотреть и поиграть</span><span class="summary-note">канон + экспериментальные копии</span></summary><div class="reference-body"><div class="tabs" id="tabs"></div><div id="referencePanel"></div></div></details>` : activeLabMethod === "rr" ? `<details class="reference-card"><summary><span>RR — правила и допуски</span><span class="summary-note">исходная методика</span></summary><div class="reference-body rr-about"><p><strong>Окно:</strong> последние два года. В рейтинге отображаются игроки минимум с двумя неустаревшими турнирами.</p><p><strong>P1 default:</strong> smooth tournament decay из PR #193: после первых 5 турниров каждый следующий постепенно уменьшает вес текущего худшего результата на 20%; legacy 5 + ceil(80%) доступен в лаборатории.</p><p><strong>sessions=0:</strong> применяется fallback портала по длительности турнира: 1 день → 4, 2 дня → 8, 3+ дня → 12 ханчанов, если доступны даты начала/окончания.</p><p><strong>С 2018 года:</strong> в исходной системе учитываются аккредитованные открытые турниры от 16 игроков и от 4 ханчанов; клубные зарубежные турниры не учитываются. Browser-lab предполагает, что загруженный CSV уже отфильтрован по аккредитации/открытости, потому что этих полей в текущей схеме CSV нет.</p><p><strong>Игроки замены:</strong> входят в число участников N при расчёте базового ранга и коэффициента турнира, но сами не отображаются в RR.</p></div></details>` : alternativeMethodReferenceHtml()}
+          ${isMcrLabMethod(activeLabMethod) ? `<details class="reference-card"><summary><span>Справочники MCR — посмотреть и поиграть</span><span class="summary-note">${activeLabMethod === "mcr-observed" ? "observed defaults + лабораторные настройки" : "Приложение 3 + лабораторные настройки"}</span></summary><div class="reference-body"><div class="tabs" id="tabs"></div><div id="referencePanel"></div></div></details>` : activeLabMethod === "rr" ? `<details class="reference-card"><summary><span>RR — правила и допуски</span><span class="summary-note">исходная методика</span></summary><div class="reference-body rr-about"><p><strong>Окно:</strong> последние два года. В рейтинге отображаются игроки минимум с двумя неустаревшими турнирами.</p><p><strong>P1 default:</strong> smooth tournament decay из PR #193: после первых 5 турниров каждый следующий постепенно уменьшает вес текущего худшего результата на 20%; legacy 5 + ceil(80%) доступен в лаборатории.</p><p><strong>sessions=0:</strong> применяется fallback портала по длительности турнира: 1 день → 4, 2 дня → 8, 3+ дня → 12 ханчанов, если доступны даты начала/окончания.</p><p><strong>С 2018 года:</strong> в исходной системе учитываются аккредитованные открытые турниры от 16 игроков и от 4 ханчанов; клубные зарубежные турниры не учитываются. Browser-lab предполагает, что загруженный CSV уже отфильтрован по аккредитации/открытости, потому что этих полей в текущей схеме CSV нет.</p><p><strong>Игроки замены:</strong> входят в число участников N при расчёте базового ранга и коэффициента турнира, но сами не отображаются в RR.</p></div></details>` : alternativeMethodReferenceHtml()}
           <section class="results-card"><div class="results-head"><div><h2>Рейтинговая таблица</h2><div class="reference-labels"><span>Текущая: <strong>${labMethodName()} / пользовательская конфигурация</strong></span><span>Default: <strong>${labMethodName()} default</strong></span></div></div><div id="metrics" class="metrics-strip"></div></div>
             <div class="ranking-toolbar"><label class="ranking-search"><span>Поиск</span><input id="rankingSearch" type="search" placeholder="Игрок, ID…" value="${esc(rankingSearch)}"></label><div class="ranking-toolbar-actions"><span id="rankingVisibleCount" class="micro"></span><button id="exportRankingCsv" class="download-button" type="button">↓ CSV</button></div></div><div id="deltaLeaders" class="delta-leaders"></div><div id="ranking"></div>
           </section>
@@ -1121,7 +1156,13 @@ function renderShell(): void {
   document.getElementById("workspaceComparison")?.addEventListener("click", () => setWorkspace("comparison"));
   document.getElementById("workspaceLab")?.addEventListener("click", () => setWorkspace("lab"));
   document.getElementById("workspaceMock")?.addEventListener("click", () => setWorkspace("mock"));
-  document.getElementById("labMethodSelect")?.addEventListener("change", (e) => { activeLabMethod = (e.currentTarget as HTMLSelectElement).value as LabMethod; activeFormulaToken=null; activeRrFormulaToken=null; activeTrueSkillFormulaToken=null; activeEloPlFormulaToken=null; renderShell(); recalc(); });
+  document.getElementById("labMethodSelect")?.addEventListener("change", (e) => {
+    storeActiveMcrConfig();
+    activeLabMethod = (e.currentTarget as HTMLSelectElement).value as LabMethod;
+    if (isMcrLabMethod(activeLabMethod)) currentConfig = configForMcrMethod(activeLabMethod);
+    activeFormulaToken=null; activeRrFormulaToken=null; activeTrueSkillFormulaToken=null; activeEloPlFormulaToken=null;
+    renderShell(); recalc();
+  });
   document.getElementById("evaluationDate")?.addEventListener("change", (e)=>{ evaluationDateState=(e.currentTarget as HTMLInputElement).value; recalc(); });
   document.getElementById("loadFiles")?.addEventListener("click", loadFiles);
   document.getElementById("loadBuiltin")?.addEventListener("click", loadBuiltin);
@@ -1135,7 +1176,13 @@ function renderShell(): void {
   document.getElementById("participantCountPolicy")?.addEventListener("change", (e)=>{ currentConfig.participantCountPolicy=(e.currentTarget as HTMLSelectElement).value as Mcr2026Config["participantCountPolicy"]; recalc(); });
 
   document.getElementById("resetMethodConfig")?.addEventListener("click", ()=>{
-    if (activeLabMethod === "mcr") { currentConfig=defaultMcr2026Config(); useKtExperiment=false; useVtExperiment=false; ktExperiment={...KT_PARTICIPANTS}; vtExperiment=MCR2026_AGE_WEIGHTS.map((x)=>({...x})); }
+    if (activeLabMethod === "mcr") {
+      projectMcrConfig=defaultMcr2026Config(); currentConfig=projectMcrConfig;
+      useKtExperiment=false; useVtExperiment=false; ktExperiment={...KT_PARTICIPANTS}; vtExperiment=MCR2026_AGE_WEIGHTS.map((x)=>({...x}));
+    } else if (activeLabMethod === "mcr-observed") {
+      observedMcrConfig=defaultObservedMcrConfig(); currentConfig=observedMcrConfig;
+      useKtExperiment=false; useVtExperiment=false; ktExperiment={...KT_PARTICIPANTS}; vtExperiment=MCR2026_AGE_WEIGHTS.map((x)=>({...x}));
+    }
     else if(activeLabMethod === "rr") { rrConfig=defaultRrConfig(); rrPlayerBands=RR_DEFAULT_PLAYER_BANDS.map((x)=>({...x})); rrSessionBands=RR_DEFAULT_SESSION_BANDS.map((x)=>({...x})); rrTypeMultipliers={...RR_DEFAULT_TYPE_MULTIPLIERS}; rrSpecialCoefficients=RR_DEFAULT_SPECIAL_COEFFICIENTS.map((x)=>({...x})); }
     else if(activeLabMethod === "trueskill") trueSkillConfig=defaultTrueSkillTournamentConfig();
     else eloPlConfig=defaultEloPlConfig();
@@ -1167,13 +1214,13 @@ function renderShell(): void {
 }
 
 function getActiveFormulaToken(): string | null {
-  if (activeLabMethod === "mcr") return activeFormulaToken;
+  if (isMcrLabMethod(activeLabMethod)) return activeFormulaToken;
   if (activeLabMethod === "rr") return activeRrFormulaToken;
   if (activeLabMethod === "trueskill") return activeTrueSkillFormulaToken;
   return activeEloPlFormulaToken;
 }
 function setActiveFormulaToken(token: string | null): void {
-  if (activeLabMethod === "mcr") activeFormulaToken=token;
+  if (isMcrLabMethod(activeLabMethod)) activeFormulaToken=token;
   else if (activeLabMethod === "rr") activeRrFormulaToken=token;
   else if (activeLabMethod === "trueskill") activeTrueSkillFormulaToken=token;
   else activeEloPlFormulaToken=token;
@@ -1303,7 +1350,7 @@ const TOKEN_HELP: Record<string, { title: string; text: string; controls?: (keyo
   },
   DoubleStrike: {
     title: "Double Strike / двойной расчёт",
-    text: "MCR-2026 default: применяется при обработке каждого турнира. Выполняются две итерации положительных изменений; перед второй пересчитывается KT по изменившимся EU участников. Режим B применяет положительные изменения второй итерации повторно. Режимы A, «только новички» и «Нет» сохранены как лабораторные альтернативы.",
+    text: "Проектный MCR default следует Приложению 3: Double Strike B применяется к каждому турниру. Legacy MCR observed использует A только при появлении новичков; это рабочая гипотеза reverse engineering и её можно менять в лаборатории.",
   },
   X: {
     title: "NRKTVT",
@@ -1532,7 +1579,7 @@ function renderReference(tab: number): void {
         <button id="resetKt">Сбросить</button>
       </div>
       <div class="table-wrap compact-table"><table class="editor-table">
-        <thead><tr><th>Участники</th><th>MCR-2026</th><th>Эксперимент</th></tr></thead>
+        <thead><tr><th>Участники</th><th>MCR reference</th><th>Эксперимент</th></tr></thead>
         <tbody>
         ${Object.entries(KT_PARTICIPANTS).map(([n, v]) => `
           <tr><td>${n}</td><td>${Number(v).toFixed(2)}</td>
@@ -1565,7 +1612,7 @@ function renderReference(tab: number): void {
         <button id="resetVt">Сбросить</button>
       </div>
       <div class="table-wrap compact-table"><table class="editor-table">
-        <thead><tr><th>Период</th><th>MCR-2026</th><th>Эксперимент</th></tr></thead>
+        <thead><tr><th>Период</th><th>MCR reference</th><th>Эксперимент</th></tr></thead>
         <tbody>
         ${MCR2026_AGE_WEIGHTS.map((x, i) => `
           <tr><td>${x.minMonths}–${x.maxMonths ?? "∞"} мес.</td><td>${x.weight.toFixed(2)}</td>
@@ -1592,8 +1639,8 @@ function renderReference(tab: number): void {
     );
   } else {
     panel.innerHTML = table(
-      ["Параметр", "MCR-2026"],
-      Object.entries(MCR2026_DEFAULTS).map(([k, v]) => [k, String(v)]),
+      ["Параметр", labMethodName()],
+      Object.entries(activeLabMethod === "mcr-observed" ? defaultObservedMcrConfig() : MCR2026_DEFAULTS).map(([k, v]) => [k, String(v)]),
       "reference-table"
     );
   }
@@ -1614,8 +1661,9 @@ type DiffRow = NonNullable<CalculationResult["ranking"][number]> & {
 };
 
 function getDiffRows(): DiffRow[] {
-  if (!current || !reference) return [];
-  const refById = new Map(reference.ranking.map((x) => [x.playerId, x]));
+  const baseline = activeMcrReference();
+  if (!current || !baseline) return [];
+  const refById = new Map(baseline.ranking.map((x) => [x.playerId, x]));
   return current.ranking.map((x) => {
     const ref = refById.get(x.playerId);
     return {
@@ -1878,7 +1926,7 @@ function renderOutput(): void {
   if (activeLabMethod === "rr") { renderRrLabOutput(); return; }
   if (activeLabMethod === "trueskill") { renderAlternativeLabOutput("trueskill"); return; }
   if (activeLabMethod === "elo-pl") { renderAlternativeLabOutput("elo-pl"); return; }
-  if (!current || !reference) {
+  if (!current || !activeMcrReference()) {
     const ranking=document.querySelector<HTMLElement>("#ranking"); if(ranking) ranking.innerHTML=`<div class="notice error">MCR не удалось рассчитать для текущего набора/конфигурации.</div>`; return;
   }
 
@@ -2020,7 +2068,8 @@ function historyOverrides(): TableOverrides {
 
 function historyMethodOptions(): Array<{ id: string; label: string; method: LabMethod; preset?: SavedLabPreset }> {
   const base: Array<{id:string;label:string;method:LabMethod}> = [
-    { id: "mcr-default", label: "MCR-2026 default", method: "mcr" },
+    { id: "mcr-default", label: "Проектный MCR (Приложение 3)", method: "mcr" },
+    { id: "mcr-observed-default", label: "Legacy MCR (Новиков observed)", method: "mcr-observed" },
     { id: "rr-default", label: "RR default", method: "rr" },
     { id: "trueskill-default", label: "TrueSkill Tournament default", method: "trueskill" },
     { id: "elo-pl-default", label: "Elo-PL default", method: "elo-pl" },
@@ -2082,8 +2131,10 @@ async function buildHistoryForMethodAsync(methodId: string): Promise<UnifiedHist
 
   const option = historyMethodOptions().find((x)=>x.id===methodId) ?? historyMethodOptions()[0];
   let job: any;
-  if (option.method === "mcr") {
-    let config = defaultMcr2026Config();
+  if (isMcrLabMethod(option.method)) {
+    let config = option.method === "mcr-observed"
+      ? defaultObservedMcrConfig()
+      : defaultMcr2026Config();
     const overrides: TableOverrides = {};
     if (option.preset) {
       const payload=option.preset.payload ?? {};
