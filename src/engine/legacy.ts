@@ -211,8 +211,11 @@ export class Mcr2026Engine {
     states: Map<string, EvolutionState>,
     kt: number,
     tournamentDate: Date,
+    onlyPlayerIds?: ReadonlySet<string>,
   ): void {
     for (const row of rows) {
+      if (onlyPlayerIds && !onlyPlayerIds.has(row.player_id)) continue;
+
       const state = states.get(row.player_id);
       if (!state) continue;
 
@@ -456,12 +459,31 @@ export class Mcr2026Engine {
         this.applyTournamentPass(sub, states, kt1.kt, tdate);
         this.enforceKyuPromotionCap(states, euBefore, participantIds, tdate);
       } else if (this.config.doubleStrikeMode === "A") {
-        // Variant A: pass 1 is provisional. It is used only to obtain the
-        // updated EU of newcomers/replacements for KT_EU. Final rank changes
-        // are recalculated once from the original pre-tournament state.
+        // Fixed DS-A. The pre-tournament state of every already-known player
+        // remains frozen while KT1 is used to seed ONLY the Double Strike
+        // players. With the Legacy observed default scope this set contains
+        // true newcomers only: players with no known state/history before the
+        // current tournament. Their discrete EU levels obtained from KT1 are
+        // substituted into the field solely to recalculate KT2.
+        //
+        // The final pass then starts again from the original pre-tournament
+        // states and applies KT2 exactly once to ALL participants. Existing
+        // players therefore never receive a provisional EU increase while KT
+        // is being derived.
         const provisionalStates = cloneStates(states);
-        this.applyTournamentPass(sub, provisionalStates, kt1.kt, tdate);
-        this.enforceKyuPromotionCap(provisionalStates, euBefore, participantIds, tdate);
+        this.applyTournamentPass(
+          sub,
+          provisionalStates,
+          kt1.kt,
+          tdate,
+          doubleStrikeIds,
+        );
+        this.enforceKyuPromotionCap(
+          provisionalStates,
+          euBefore,
+          doubleStrikeIds,
+          tdate,
+        );
 
         const provisionalEu = new Map<string, number>();
         for (const pid of doubleStrikeIds) {
@@ -481,6 +503,7 @@ export class Mcr2026Engine {
           t.is_status_tournament,
         );
 
+        // One and only one final evolutionary pass for the whole field.
         this.applyTournamentPass(sub, states, ktFinal.kt, tdate);
         this.enforceKyuPromotionCap(states, euBefore, participantIds, tdate);
       } else {

@@ -120,7 +120,11 @@ export class EvolutionEngine {
    * is the nearest value not exceeding NR*KT.
    *
    * For 1 dan and above, floor((NR*KT - EU_before) / 500) pluses are earned.
-   * Existing minuses are not erased first: pluses and minuses cancel.
+   * Literal Appendix 3 keeps arithmetic cancellation of plus/minus marks.
+   * Legacy observed differs in two places below: successful dan confirmation
+   * clears an existing minus before new pluses are applied; a kyu crossing
+   * into dan first establishes D1/EU 2000 and converts only the residual
+   * performance above 2000 into 500-point pluses.
    */
   processPerformance(
     state: EvolutionState,

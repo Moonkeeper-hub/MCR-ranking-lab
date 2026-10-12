@@ -1040,7 +1040,7 @@ function renderShell(): void {
     <details class="side-section"><summary>EU / даны</summary><div class="section-body compact-stack">
       <label class="select-row"><span>Double Strike</span><select id="doubleStrikeMode">
         <option value="none" ${currentConfig.doubleStrikeMode === "none" ? "selected" : ""}>Нет</option>
-        <option value="A" ${currentConfig.doubleStrikeMode === "A" ? "selected" : ""}>A — полный пересчёт</option>
+        <option value="A" ${currentConfig.doubleStrikeMode === "A" ? "selected" : ""}>A — fixed: KT₁ только для DS-игроков, затем один финальный проход</option>
         <option value="B" ${currentConfig.doubleStrikeMode === "B" ? "selected" : ""}>B — продолжение первой итерации</option>
       </select></label>
       <label class="select-row"><span>Когда применять Double Strike</span><select id="doubleStrikeScope">
@@ -1350,7 +1350,7 @@ const TOKEN_HELP: Record<string, { title: string; text: string; controls?: (keyo
   },
   DoubleStrike: {
     title: "Double Strike / двойной расчёт",
-    text: "Проектный MCR default следует Приложению 3: Double Strike B применяется к каждому турниру. Legacy MCR observed использует A только при появлении новичков; это рабочая гипотеза reverse engineering и её можно менять в лаборатории.",
+    text: "Проектный MCR default следует Приложению 3: Double Strike B применяется к каждому турниру. Legacy MCR observed по умолчанию использует fixed DS-A только при появлении настоящих новичков: KT₁ определяет их промежуточные дискретные EU, затем пересчитывается KT₂, после чего весь турнир один раз считается заново от стартовых состояний.",
   },
   X: {
     title: "NRKTVT",
@@ -1480,7 +1480,7 @@ function renderFormulaInspector(): void {
         <span>Double Strike</span>
         <select id="formulaDoubleStrike">
           <option value="none" ${currentConfig.doubleStrikeMode === "none" ? "selected" : ""}>Нет</option>
-          <option value="A" ${currentConfig.doubleStrikeMode === "A" ? "selected" : ""}>A — полный пересчёт</option>
+          <option value="A" ${currentConfig.doubleStrikeMode === "A" ? "selected" : ""}>A — fixed: KT₁ только для DS-игроков, затем один финальный проход</option>
           <option value="B" ${currentConfig.doubleStrikeMode === "B" ? "selected" : ""}>B — продолжение первой итерации</option>
         </select>
       </label>
@@ -1488,7 +1488,7 @@ function renderFormulaInspector(): void {
         <span>Область применения</span>
         <select id="formulaDoubleStrikeScope">
           <option value="every_tournament" ${currentConfig.doubleStrikeScope === "every_tournament" ? "selected" : ""}>Каждый турнир — default</option>
-          <option value="newcomers_only" ${currentConfig.doubleStrikeScope === "newcomers_only" ? "selected" : ""}>Только новички — эксперимент</option>
+          <option value="newcomers_only" ${currentConfig.doubleStrikeScope === "newcomers_only" ? "selected" : ""}>Только настоящие новички — Legacy observed default</option>
         </select>
       </label>`;
   }
