@@ -8,7 +8,9 @@ export type RatingWorkerJob =
   | { kind: "trueskill"; config: unknown; evaluationDate: string }
   | { kind: "trueskill-history"; config: unknown }
   | { kind: "elo-pl"; config: unknown; evaluationDate: string }
-  | { kind: "elo-pl-history"; config: unknown };
+  | { kind: "elo-pl-history"; config: unknown }
+  | { kind: "ass"; config: unknown; evaluationDate: string }
+  | { kind: "ass-history"; config: unknown };
 
 interface QueueItem<T = unknown> {
   id: number;

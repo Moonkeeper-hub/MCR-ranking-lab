@@ -154,3 +154,17 @@ export function renderEloPlMath(config: EloPlConfig): string {
   return `<div class="math-formula-stack"><div class="math-line math-line-primary">${p}</div><div class="math-line math-line-secondary">${start}</div><div class="math-line math-line-secondary">${g}</div><div class="math-line">${factors}</div><div class="math-line">${k}</div><div class="math-line math-line-secondary">${upd}</div><div class="math-line math-line-secondary">${norm}</div></div>`;
 }
 
+
+import type { AssConfig } from "../engine/ass";
+
+export function renderAssMath(config: AssConfig): string {
+  const rating = render(String.raw`\mathrm{ASS}= ${hotspot(n(config.strengthWeight),"assStrengthWeight")}\,${hotspot("S","assStrength")} + ${hotspot(n(config.achievementWeight),"assAchievementWeight")}\,${hotspot("A","assAchievement")}`);
+  const strength = render(String.raw`${hotspot("S","assStrength")} = 1000\,\sigma_{log}\!\left(\frac{(${hotspot("\mu","assMu")}-${hotspot(n(config.conservativeK),"assK")}${hotspot("\sigma","assSigma")})-${hotspot(n(config.plStartRating,0),"assStart")}}{${hotspot(n(config.displayScale,0),"assDisplayScale")}}\right)`);
+  const sigma = render(String.raw`${hotspot("\sigma","assSigma")} = \frac{${hotspot(n(config.initialSigma,0),"assInitialSigma")}}{\sqrt{1+${hotspot("I","assInformation")}}}`);
+  const place = render(String.raw`${hotspot("P_i","assPlace")} = \left(\frac{N_i-p_i}{N_i-1}\right)^{${hotspot(n(config.achievementAlpha,2),"assAlpha")}}`);
+  const field = render(String.raw`${hotspot("Q_i","assField")} = \mathrm{clip}\!\left(1+${hotspot(n(config.fieldStrengthCoef,2),"assFieldCoef")}\frac{${hotspot("S_{field}","assFieldScore")}-500}{500},\ ${hotspot(n(config.fieldStrengthMin,2),"assFieldMin")},\ ${hotspot(n(config.fieldStrengthMax,2),"assFieldMax")}\right)`);
+  const achievement = render(String.raw`${hotspot("A_i","assTournamentAchievement")} = 1000\,${hotspot("P_i","assPlace")}\,${hotspot("Q_i","assField")},\qquad ${hotspot("w_i","assDecay")} = 2^{-t_i/${hotspot(n(config.achievementHalfLifeMonths,0),"assHalfLife")}}`);
+  const aggregate = render(String.raw`${hotspot("A","assAchievement")} = \frac{${hotspot(n(config.achievementPriorWeight,2),"assPriorWeight")}\cdot${hotspot(n(config.achievementPrior,0),"assPrior")}+\sum_i ${hotspot("w_iA_i","assDecay")}}{${hotspot(n(config.achievementPriorWeight,2),"assPriorWeight")}+\sum_i ${hotspot("w_i","assDecay")}}`);
+  const unknown = render(String.raw`${hotspot("\mu_{unknown}","assUnknown")} = \mathrm{median}\left(${hotspot("\mu_{known\ participants}","assUnknown")}\right)`);
+  return `<div class="math-formula-stack"><div class="math-line math-line-primary">${rating}</div><div class="math-line">${strength}</div><div class="math-line math-line-secondary">${sigma}</div><div class="math-line">${place}</div><div class="math-line math-line-secondary">${field}</div><div class="math-line">${achievement}</div><div class="math-line math-line-secondary">${aggregate}</div><div class="math-line math-line-secondary">${unknown}</div></div>`;
+}

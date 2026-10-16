@@ -1,7 +1,7 @@
 
 import "./styles.css";
 import "katex/dist/katex.min.css";
-import { renderMcr2026Math, renderRrMath, renderTrueSkillTournamentMath, renderEloPlMath } from "./ui/formulas";
+import { renderMcr2026Math, renderRrMath, renderTrueSkillTournamentMath, renderEloPlMath, renderAssMath } from "./ui/formulas";
 import { defaultMcr2026Config, defaultObservedMcrConfig } from "./engine/legacy";
 import {
   defaultRrConfig, RR_DEFAULT_PLAYER_BANDS, RR_DEFAULT_SESSION_BANDS,
@@ -29,6 +29,7 @@ import { LruCache, stableSerialize } from "./performanceCache";
 import { RatingWorkerPool } from "./workerPool";
 import { defaultTrueSkillTournamentConfig, type TrueSkillTournamentConfig, type TrueSkillTournamentResult } from "./engine/trueskillTournament";
 import { defaultEloPlConfig, type EloPlConfig, type EloPlResult, type EloNormalization } from "./engine/eloPl";
+import { defaultAssConfig, type AssConfig, type AssResult } from "./engine/ass";
 import { renderMockWorkspace } from "./mockUi";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -58,6 +59,10 @@ let trueSkillReference: TrueSkillTournamentResult | null = null;
 let eloPlConfig: EloPlConfig = defaultEloPlConfig();
 let eloPlCurrent: EloPlResult | null = null;
 let eloPlReference: EloPlResult | null = null;
+let assConfig: AssConfig = defaultAssConfig();
+let assCurrent: AssResult | null = null;
+let assReference: AssResult | null = null;
+let activeAssFormulaToken: string | null = null;
 let activeTrueSkillFormulaToken: string | null = null;
 let activeEloPlFormulaToken: string | null = null;
 let dataLabel = "встроенный demo dataset";
@@ -65,7 +70,7 @@ let evaluationDateState = todayIso();
 let activeFormulaToken: string | null = null;
 let activeRrFormulaToken: string | null = null;
 let activeReferenceTab = 0;
-type LabMethod = "mcr" | "mcr-observed" | "rr" | "trueskill" | "elo-pl";
+type LabMethod = "mcr" | "mcr-observed" | "rr" | "trueskill" | "elo-pl" | "ass";
 let activeLabMethod: LabMethod = "mcr";
 let comparisonPresetId = "";
 
@@ -155,6 +160,7 @@ const mcrCalculationCache = new LruCache<CalculationResult>(24);
 const rrCalculationCache = new LruCache<RrCalculationResult>(24);
 const trueSkillCalculationCache = new LruCache<TrueSkillTournamentResult>(24);
 const eloPlCalculationCache = new LruCache<EloPlResult>(24);
+const assCalculationCache = new LruCache<AssResult>(24);
 const historyMethodCache = new LruCache<UnifiedHistorySnapshot[]>(12);
 const distanceMetricCache = new LruCache<RankingDistanceMetric>(24);
 const ratingWorkers = new RatingWorkerPool();
@@ -162,6 +168,7 @@ const mcrInFlight = new Map<string, Promise<CalculationResult>>();
 const rrInFlight = new Map<string, Promise<RrCalculationResult>>();
 const trueSkillInFlight = new Map<string, Promise<TrueSkillTournamentResult>>();
 const eloPlInFlight = new Map<string, Promise<EloPlResult>>();
+const assInFlight = new Map<string, Promise<AssResult>>();
 const historyInFlight = new Map<string, Promise<UnifiedHistorySnapshot[]>>();
 let recalcTimer: number | undefined;
 let recalcGeneration = 0;
@@ -176,6 +183,7 @@ function clearDatasetCaches(): void {
   rrCalculationCache.clear();
   trueSkillCalculationCache.clear();
   eloPlCalculationCache.clear();
+  assCalculationCache.clear();
   historyMethodCache.clear();
   distanceMetricCache.clear();
   orderedEventsCacheRevision = -1;
@@ -185,6 +193,7 @@ function clearDatasetCaches(): void {
   rrInFlight.clear();
   trueSkillInFlight.clear();
   eloPlInFlight.clear();
+  assInFlight.clear();
   historyInFlight.clear();
 }
 
@@ -251,11 +260,17 @@ function trueSkillCalculationKey(config: TrueSkillTournamentConfig, evaluationDa
 function eloPlCalculationKey(config: EloPlConfig, evaluationDate: string): string {
   return `elo-pl|${datasetRevision}|${evaluationDate}|${stableSerialize(config)}`;
 }
+function assCalculationKey(config: AssConfig, evaluationDate: string): string {
+  return `ass|${datasetRevision}|${evaluationDate}|${stableSerialize(config)}`;
+}
 function getTrueSkillCached(config: TrueSkillTournamentConfig, evaluationDate: string): TrueSkillTournamentResult | undefined {
   return trueSkillCalculationCache.get(trueSkillCalculationKey(config, evaluationDate));
 }
 function getEloPlCached(config: EloPlConfig, evaluationDate: string): EloPlResult | undefined {
   return eloPlCalculationCache.get(eloPlCalculationKey(config, evaluationDate));
+}
+function getAssCached(config: AssConfig, evaluationDate: string): AssResult | undefined {
+  return assCalculationCache.get(assCalculationKey(config, evaluationDate));
 }
 async function calculateTrueSkillCachedAsync(config: TrueSkillTournamentConfig, evaluationDate: string): Promise<TrueSkillTournamentResult> {
   const key=trueSkillCalculationKey(config,evaluationDate); const cached=trueSkillCalculationCache.get(key); if(cached)return cached; const running=trueSkillInFlight.get(key); if(running)return running;
@@ -264,6 +279,10 @@ async function calculateTrueSkillCachedAsync(config: TrueSkillTournamentConfig, 
 async function calculateEloPlCachedAsync(config: EloPlConfig, evaluationDate: string): Promise<EloPlResult> {
   const key=eloPlCalculationKey(config,evaluationDate); const cached=eloPlCalculationCache.get(key); if(cached)return cached; const running=eloPlInFlight.get(key); if(running)return running;
   const promise=ratingWorkers.run<EloPlResult>({kind:"elo-pl",config,evaluationDate}).then((result)=>{eloPlCalculationCache.set(key,result);return result;}).finally(()=>eloPlInFlight.delete(key)); eloPlInFlight.set(key,promise); return promise;
+}
+async function calculateAssCachedAsync(config: AssConfig, evaluationDate: string): Promise<AssResult> {
+  const key=assCalculationKey(config,evaluationDate); const cached=assCalculationCache.get(key); if(cached)return cached; const running=assInFlight.get(key); if(running)return running;
+  const promise=ratingWorkers.run<AssResult>({kind:"ass",config,evaluationDate}).then((result)=>{assCalculationCache.set(key,result);return result;}).finally(()=>assInFlight.delete(key)); assInFlight.set(key,promise); return promise;
 }
 
 function esc(v: unknown): string {
@@ -325,6 +344,7 @@ function captureCurrentPreset(name: string): SavedLabPreset {
     specialCoefficients: rrSpecialCoefficients.map((x) => ({ ...x })),
   }};
   if (activeLabMethod === "trueskill") return { id, name, method: "trueskill", savedAt: new Date().toISOString(), payload: { config: { ...trueSkillConfig } } };
+  if (activeLabMethod === "ass") return { id, name, method: "ass", savedAt: new Date().toISOString(), payload: { config: { ...assConfig } } };
   return { id, name, method: "elo-pl", savedAt: new Date().toISOString(), payload: { config: { ...eloPlConfig } } };
 }
 
@@ -351,6 +371,8 @@ function applyPreset(preset: SavedLabPreset): void {
     rrSpecialCoefficients = (preset.payload?.specialCoefficients ?? RR_DEFAULT_SPECIAL_COEFFICIENTS).map((x: RrSpecialCoefficient) => ({ ...x }));
   } else if (preset.method === "trueskill") {
     trueSkillConfig = { ...defaultTrueSkillTournamentConfig(), ...(preset.payload?.config ?? {}) };
+  } else if (preset.method === "ass") {
+    assConfig = { ...defaultAssConfig(), ...(preset.payload?.config ?? {}) };
   } else {
     eloPlConfig = { ...defaultEloPlConfig(), ...(preset.payload?.config ?? {}) };
   }
@@ -405,6 +427,8 @@ async function recalc(): Promise<void> {
     calculateTrueSkillCachedAsync(defaultTrueSkillTournamentConfig(), evaluationDate),
     calculateEloPlCachedAsync(eloPlConfig, evaluationDate),
     calculateEloPlCachedAsync(defaultEloPlConfig(), evaluationDate),
+    calculateAssCachedAsync(assConfig, evaluationDate),
+    calculateAssCachedAsync(defaultAssConfig(), evaluationDate),
   ]);
   if (generation !== recalcGeneration) return;
 
@@ -422,6 +446,8 @@ async function recalc(): Promise<void> {
   trueSkillReference = assign(jobs[6] as PromiseSettledResult<TrueSkillTournamentResult>, "TrueSkill Tournament default");
   eloPlCurrent = assign(jobs[7] as PromiseSettledResult<EloPlResult>, "Elo-PL lab");
   eloPlReference = assign(jobs[8] as PromiseSettledResult<EloPlResult>, "Elo-PL default");
+  assCurrent = assign(jobs[9] as PromiseSettledResult<AssResult>, "ASS lab");
+  assReference = assign(jobs[10] as PromiseSettledResult<AssResult>, "ASS default");
 
   // Selected comparison preset is warmed in the same two-worker queues so the
   // comparison renderer never has to start a cold calculation on the UI thread.
@@ -643,6 +669,30 @@ const ELO_CONTROL_DEFS: Array<{key: Exclude<keyof EloPlConfig,"normalization">; 
 function eloControlHtml(def: typeof ELO_CONTROL_DEFS[number]): string { const value=Number(eloPlConfig[def.key]); return `<div class="control-row"><div class="control-head"><label>${esc(def.label)}</label><span class="control-value">${value.toFixed(def.digits??2)}</span></div><input data-elo-config-key="${String(def.key)}" type="range" min="${def.min}" max="${def.max}" step="${def.step}" value="${value}"></div>`; }
 function bindEloControls(root: ParentNode=document): void { root.querySelectorAll<HTMLInputElement>("[data-elo-config-key]").forEach((input)=>{input.oninput=()=>{const key=input.dataset.eloConfigKey as Exclude<keyof EloPlConfig,"normalization">; (eloPlConfig[key] as number)=Number(input.value); const def=ELO_CONTROL_DEFS.find(x=>x.key===key)!; const out=input.closest(".control-row")?.querySelector<HTMLElement>(".control-value"); if(out)out.textContent=Number(input.value).toFixed(def.digits??2); scheduleRecalc();};}); root.querySelectorAll<HTMLSelectElement>("[data-elo-normalization]").forEach((select)=>{select.onchange=()=>{eloPlConfig.normalization=select.value as EloNormalization; scheduleRecalc();};}); }
 
+type AssNumericKey = { [K in keyof AssConfig]: AssConfig[K] extends number ? K : never }[keyof AssConfig];
+const ASS_CONTROL_DEFS: Array<{key:AssNumericKey;label:string;min:number;max:number;step:number;digits?:number}> = [
+  {key:"strengthWeight",label:"Вес PL strength",min:0,max:1,step:0.01},
+  {key:"achievementWeight",label:"Вес achievements",min:0,max:1,step:0.01},
+  {key:"plStartRating",label:"PL center / старт",min:500,max:2500,step:10,digits:0},
+  {key:"plK",label:"PL K",min:1,max:128,step:1,digits:0},
+  {key:"plScale",label:"PL temperature",min:25,max:500,step:5,digits:0},
+  {key:"initialSigma",label:"Стартовая σ",min:25,max:800,step:5,digits:0},
+  {key:"conservativeK",label:"k в μ − kσ",min:0,max:3,step:0.05},
+  {key:"confidencePlayersCoef",label:"Информация: размер поля",min:0,max:2,step:0.05},
+  {key:"confidenceSessionsCoef",label:"Информация: ханчаны",min:0,max:2,step:0.05},
+  {key:"displayScale",label:"Шкала S",min:50,max:1000,step:10,digits:0},
+  {key:"achievementAlpha",label:"α места",min:0.5,max:4,step:0.05},
+  {key:"achievementHalfLifeMonths",label:"Half-life achievement, мес.",min:3,max:60,step:1,digits:0},
+  {key:"achievementPrior",label:"Achievement prior",min:0,max:1000,step:10,digits:0},
+  {key:"achievementPriorWeight",label:"Вес prior",min:0,max:10,step:0.1},
+  {key:"fieldStrengthCoef",label:"Влияние силы поля",min:0,max:1,step:0.01},
+  {key:"fieldStrengthMin",label:"Q field min",min:0.25,max:1.5,step:0.01},
+  {key:"fieldStrengthMax",label:"Q field max",min:0.5,max:2,step:0.01},
+  {key:"minPlayers",label:"Минимум игроков",min:4,max:128,step:1,digits:0},
+];
+function assControlHtml(def: typeof ASS_CONTROL_DEFS[number]): string { const value=Number(assConfig[def.key]); return `<div class="control-row"><div class="control-head"><label>${esc(def.label)}</label><span class="control-value">${value.toFixed(def.digits??2)}</span></div><input data-ass-config-key="${String(def.key)}" type="range" min="${def.min}" max="${def.max}" step="${def.step}" value="${value}"></div>`; }
+function bindAssControls(root: ParentNode=document): void { root.querySelectorAll<HTMLInputElement>("[data-ass-config-key]").forEach((input)=>{input.oninput=()=>{const key=input.dataset.assConfigKey as AssNumericKey; const value=Number(input.value); (assConfig[key] as number)=value; if(key==="strengthWeight") assConfig.achievementWeight=Number((1-value).toFixed(2)); if(key==="achievementWeight") assConfig.strengthWeight=Number((1-value).toFixed(2)); const def=ASS_CONTROL_DEFS.find(x=>x.key===key)!; const out=input.closest(".control-row")?.querySelector<HTMLElement>(".control-value"); if(out)out.textContent=value.toFixed(def.digits??2); scheduleRecalc();};}); }
+
 function rrBandTable(bands: RrRangeBand[], kind: "player" | "session"): string {
   const unit = kind === "player" ? "игроков" : "туров";
   return `<div class="table-wrap compact-table"><table class="editor-table">
@@ -727,6 +777,7 @@ async function warmSavedPreset(preset: SavedLabPreset, evaluationDate: string): 
     }, evaluationDate); return;
   }
   if (preset.method === "trueskill") { await calculateTrueSkillCachedAsync({ ...defaultTrueSkillTournamentConfig(), ...(payload.config ?? {}) }, evaluationDate); return; }
+  if (preset.method === "ass") { await calculateAssCachedAsync({ ...defaultAssConfig(), ...(payload.config ?? {}) }, evaluationDate); return; }
   await calculateEloPlCachedAsync({ ...defaultEloPlConfig(), ...(payload.config ?? {}) }, evaluationDate);
 }
 
@@ -753,11 +804,15 @@ function calculateSavedPreset(preset: SavedLabPreset, evaluationDate: string): {
     const result=getTrueSkillCached({ ...defaultTrueSkillTournamentConfig(), ...(payload.config ?? {}) }, evaluationDate);
     return result ? { name:preset.name, method:"TrueSkill Tournament", ranking:result.ranking.map(x=>({playerId:x.playerId,playerName:x.playerName,rank:x.rank,rating:x.rating})) } : null;
   }
+  if (preset.method === "ass") {
+    const result=getAssCached({ ...defaultAssConfig(), ...(payload.config ?? {}) }, evaluationDate);
+    return result ? { name:preset.name, method:"ASS", ranking:result.ranking.map(x=>({playerId:x.playerId,playerName:x.playerName,rank:x.rank,rating:x.rating})) } : null;
+  }
   const result=getEloPlCached({ ...defaultEloPlConfig(), ...(payload.config ?? {}) }, evaluationDate);
   return result ? { name:preset.name, method:"Elo-PL", ranking:result.ranking.map(x=>({playerId:x.playerId,playerName:x.playerName,rank:x.rank,rating:x.rating})) } : null;
 }
 
-function diagnosticSummaryHtml(title: string, result: { diagnostics?: any[]; isComplete?: boolean; processedTournamentCount?: number; skippedTournamentCount?: number } | null, kind: "mcr" | "rr" | "trueskill" | "elo-pl"): string {
+function diagnosticSummaryHtml(title: string, result: { diagnostics?: any[]; isComplete?: boolean; processedTournamentCount?: number; skippedTournamentCount?: number } | null, kind: "mcr" | "rr" | "trueskill" | "elo-pl" | "ass"): string {
   if (!result) return `<div class="method-validation error"><strong>${esc(title)}</strong><span>Расчёт не выполнен.</span></div>`;
   const diagnostics = result.diagnostics ?? [];
   const groups = new Map<string, number>();
@@ -827,7 +882,7 @@ function distanceHorizonMonths(methodId: string): number {
     const config = option.preset?.payload?.config ?? {};
     return Number(config.ageZeroMonths ?? defaultRrConfig().ageZeroMonths);
   }
-  // TrueSkill Tournament and Elo-PL have no hard expiry cutoff. For Patrick's
+  // TrueSkill Tournament, Elo-PL and ASS have no hard expiry cutoff. For Patrick's
   // metric we use a neutral 24-month analysis horizon, matching the project's
   // current cross-method comparison window rather than changing either engine.
   return 24;
@@ -938,7 +993,7 @@ function ensureDistanceHistories(methodIds: string[]): void {
 function renderDistanceMetrics(): void {
   const host = document.querySelector<HTMLDivElement>("#distanceMetricMethods");
   if (!host) return;
-  const methodIds = ["mcr-default", "mcr-observed-default", "rr-default", "trueskill-default", "elo-pl-default"];
+  const methodIds = ["mcr-default", "mcr-observed-default", "rr-default", "trueskill-default", "elo-pl-default", "ass-default"];
   if (comparisonPresetId) methodIds.push(`preset:${comparisonPresetId}`);
   const uniqueIds = [...new Set(methodIds)].filter((id) => historyMethodOptions().some((option) => option.id === id));
   if (!players.length || !results.length) {
@@ -999,6 +1054,7 @@ function labMethodName(method: LabMethod = activeLabMethod): string {
   if (method === "mcr-observed") return "Legacy MCR (Новиков observed)";
   if (method === "rr") return "RR";
   if (method === "trueskill") return "TrueSkill Tournament";
+  if (method === "ass") return "ASS — Arslan's Simplified Scoring";
   return "Elo-PL";
 }
 function labMethodCaption(method: LabMethod = activeLabMethod): string {
@@ -1006,17 +1062,20 @@ function labMethodCaption(method: LabMethod = activeLabMethod): string {
   if (method === "mcr-observed") return "Реверс-инжиниринг опубликованных рейтингов Новикова";
   if (method === "rr") return "Внутренний российский рейтинг: две части A и B";
   if (method === "trueskill") return "Один турнир = одно multiplayer-наблюдение; состояние игрока задаётся μ и σ";
+  if (method === "ass") return "50% conservative Plackett–Luce strength + 50% time-decayed achievements";
   return "Plackett–Luce likelihood по полному порядку мест и Elo-подобное обновление";
 }
 function renderActiveFormula(): string {
   if (isMcrLabMethod(activeLabMethod)) return renderMcr2026Math(currentConfig);
   if (activeLabMethod === "rr") return renderRrMath(rrConfig);
   if (activeLabMethod === "trueskill") return renderTrueSkillTournamentMath(trueSkillConfig);
+  if (activeLabMethod === "ass") return renderAssMath(assConfig);
   return renderEloPlMath(eloPlConfig);
 }
 function alternativeMethodReferenceHtml(): string {
   if (activeLabMethod === "trueskill") return `<details class="reference-card"><summary><span>TrueSkill Tournament — принятые допущения</span><span class="summary-note">турнирный вариант</span></summary><div class="reference-body rr-about"><p><strong>Наблюдение:</strong> весь турнир считается одним free-for-all multiplayer-наблюдением по итоговому порядку мест. Ничьих в данных не предполагается.</p><p><strong>Старт:</strong> канонические базовые значения μ=25, σ=25/3, β=25/6; каждый из них умножается на отдельный лабораторный коэффициент.</p><p><strong>Ранжирование:</strong> μ−kσ, базово k=3. Это conservative score: высокая неопределённость понижает позицию игрока.</p><p><strong>τ / decay:</strong> перед следующим турниром σ увеличивается календарно пропорционально √Δt; коэффициент 0 полностью отключает этот эффект, 3 делает его втрое сильнее.</p><p><strong>Турнирная поправка:</strong> после стандартного TrueSkill update изменение μ/σ масштабируется умеренным весом, зависящим отдельно от размера турнира и числа ханчанов. Общий коэффициент 0 выключает поправку.</p></div></details>`;
   if (activeLabMethod === "elo-pl") return `<details class="reference-card"><summary><span>Elo-PL — принятые допущения</span><span class="summary-note">Plackett–Luce</span></summary><div class="reference-body rr-about"><p><strong>Наблюдение:</strong> полный итоговый порядок мест турнира. Вероятность порядка задаётся моделью Plackett–Luce.</p><p><strong>Старт:</strong> 1500. Внутреннее состояние всегда хранится на исходной Elo-шкале.</p><p><strong>K:</strong> эффективный K складывается из базового K и редактируемых множителей размера турнира, опыта игрока и числа ханчанов.</p><p><strong>Нормализация:</strong> Off / 0–1000 / 0–3000 влияет только на отображаемую шкалу. Следующие турниры всегда считаются по ненормированному внутреннему рейтингу.</p><p><strong>Турниры:</strong> любая валидная таблица итоговых мест с числом участников не меньше заданного минимума.</p></div></details>`;
+  if (activeLabMethod === "ass") return `<details class="reference-card"><summary><span>ASS — принятые допущения</span><span class="summary-note">experimental hybrid</span></summary><div class="reference-body rr-about"><p><strong>Итог:</strong> 50% conservative PL strength и 50% time-decayed achievements; веса редактируются.</p><p><strong>PL:</strong> полный порядок мест. Неизвестный рейтингу участник стартует с медианного μ известных участников этого турнира; если известных нет — с общего start rating.</p><p><strong>σ:</strong> это упрощённый confidence proxy, а не полноценная Bayesian posterior σ: она уменьшается по мере накопления информативных турниров и сама по себе не растёт от календарной неактивности.</p><p><strong>Achievement:</strong> нелинейный percentile ((N−place)/(N−1))^α, умноженный на ограниченную поправку силы поля. Старые достижения имеют half-life и стягиваются к prior.</p><p><strong>Время:</strong> календарное устаревание действует только на achievement-компоненту, поэтому отдельного двойного штрафа за неактивность нет.</p></div></details>`;
   return "";
 }
 
@@ -1070,7 +1129,11 @@ function renderShell(): void {
     <details class="side-section" open><summary>Plackett–Luce / Elo</summary><div class="section-body">${ELO_CONTROL_DEFS.slice(0,3).map(eloControlHtml).join("")}</div></details>
     <details class="side-section" open><summary>Множители K</summary><div class="section-body">${ELO_CONTROL_DEFS.slice(3).map(eloControlHtml).join("")}</div></details>
     <details class="side-section"><summary>Отображение</summary><div class="section-body"><label class="select-row"><span>Нормализация</span><select data-elo-normalization><option value="off" ${eloPlConfig.normalization==="off"?"selected":""}>Off</option><option value="0-1000" ${eloPlConfig.normalization==="0-1000"?"selected":""}>0–1000</option><option value="0-3000" ${eloPlConfig.normalization==="0-3000"?"selected":""}>0–3000</option></select></label></div></details>`;
-  const methodControls = isMcrLabMethod(activeLabMethod) ? mcrControls : activeLabMethod === "rr" ? rrControls : activeLabMethod === "trueskill" ? trueSkillControls : eloControls;
+  const assControls = `
+    <details class="side-section" open><summary>Итоговый ASS</summary><div class="section-body">${ASS_CONTROL_DEFS.filter(x=>["strengthWeight","achievementWeight"].includes(String(x.key))).map(assControlHtml).join("")}</div></details>
+    <details class="side-section" open><summary>PL strength / confidence</summary><div class="section-body">${ASS_CONTROL_DEFS.filter(x=>["plStartRating","plK","plScale","initialSigma","conservativeK","confidencePlayersCoef","confidenceSessionsCoef","displayScale","minPlayers"].includes(String(x.key))).map(assControlHtml).join("")}</div></details>
+    <details class="side-section" open><summary>Achievements / decay</summary><div class="section-body">${ASS_CONTROL_DEFS.filter(x=>["achievementAlpha","achievementHalfLifeMonths","achievementPrior","achievementPriorWeight","fieldStrengthCoef","fieldStrengthMin","fieldStrengthMax"].includes(String(x.key))).map(assControlHtml).join("")}</div></details>`;
+  const methodControls = isMcrLabMethod(activeLabMethod) ? mcrControls : activeLabMethod === "rr" ? rrControls : activeLabMethod === "trueskill" ? trueSkillControls : activeLabMethod === "ass" ? assControls : eloControls;
 
   app.innerHTML = `
     <div class="app">
@@ -1120,7 +1183,7 @@ function renderShell(): void {
         <aside class="sidebar"><section class="side-card">
           <div class="side-title">Лаборатория методик</div>
           <div class="section-body compact-stack method-picker">
-            <label class="select-row"><span>Методика</span><select id="labMethodSelect"><option value="mcr" ${activeLabMethod === "mcr" ? "selected" : ""}>Проектный MCR (Приложение 3)</option><option value="mcr-observed" ${activeLabMethod === "mcr-observed" ? "selected" : ""}>Legacy MCR (Новиков observed)</option><option value="rr" ${activeLabMethod === "rr" ? "selected" : ""}>RR</option><option value="trueskill" ${activeLabMethod === "trueskill" ? "selected" : ""}>TrueSkill Tournament</option><option value="elo-pl" ${activeLabMethod === "elo-pl" ? "selected" : ""}>Elo-PL</option></select></label>
+            <label class="select-row"><span>Методика</span><select id="labMethodSelect"><option value="mcr" ${activeLabMethod === "mcr" ? "selected" : ""}>Проектный MCR (Приложение 3)</option><option value="mcr-observed" ${activeLabMethod === "mcr-observed" ? "selected" : ""}>Legacy MCR (Новиков observed)</option><option value="rr" ${activeLabMethod === "rr" ? "selected" : ""}>RR</option><option value="trueskill" ${activeLabMethod === "trueskill" ? "selected" : ""}>TrueSkill Tournament</option><option value="elo-pl" ${activeLabMethod === "elo-pl" ? "selected" : ""}>Elo-PL</option><option value="ass" ${activeLabMethod === "ass" ? "selected" : ""}>ASS — Arslan's Simplified Scoring</option></select></label>
             <div class="preset-box"><label>Сохранённый пресет<select id="labPresetSelect"><option value="">— выбрать —</option>${presets.map((p)=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label>
             <div class="preset-save-row"><input id="presetName" type="text" placeholder="Название пресета"><button id="savePreset" type="button">Сохранить</button><button id="deletePreset" type="button">Удалить</button></div></div>
           </div>
@@ -1149,6 +1212,7 @@ function renderShell(): void {
   renderRrControls();
   bindTrueSkillControls();
   bindEloControls();
+  bindAssControls();
   bindFormulaTokens();
   setupTabs();
   renderFormulaInspector();
@@ -1160,14 +1224,14 @@ function renderShell(): void {
     storeActiveMcrConfig();
     activeLabMethod = (e.currentTarget as HTMLSelectElement).value as LabMethod;
     if (isMcrLabMethod(activeLabMethod)) currentConfig = configForMcrMethod(activeLabMethod);
-    activeFormulaToken=null; activeRrFormulaToken=null; activeTrueSkillFormulaToken=null; activeEloPlFormulaToken=null;
+    activeFormulaToken=null; activeRrFormulaToken=null; activeTrueSkillFormulaToken=null; activeEloPlFormulaToken=null; activeAssFormulaToken=null;
     renderShell(); recalc();
   });
   document.getElementById("evaluationDate")?.addEventListener("change", (e)=>{ evaluationDateState=(e.currentTarget as HTMLInputElement).value; recalc(); });
   document.getElementById("loadFiles")?.addEventListener("click", loadFiles);
   document.getElementById("loadBuiltin")?.addEventListener("click", loadBuiltin);
   document.getElementById("rankingSearch")?.addEventListener("input", (e) => { rankingSearch=(e.currentTarget as HTMLInputElement).value; renderOutput(); });
-  document.getElementById("exportRankingCsv")?.addEventListener("click", () => { if(activeLabMethod==="rr") exportRrRankingCsv(); else if(activeLabMethod==="trueskill") exportTrueSkillCsv(); else if(activeLabMethod==="elo-pl") exportEloPlCsv(); else exportRankingCsv(); });
+  document.getElementById("exportRankingCsv")?.addEventListener("click", () => { if(activeLabMethod==="rr") exportRrRankingCsv(); else if(activeLabMethod==="trueskill") exportTrueSkillCsv(); else if(activeLabMethod==="elo-pl") exportEloPlCsv(); else if(activeLabMethod==="ass") exportAssCsv(); else exportRankingCsv(); });
 
   document.getElementById("doubleStrikeMode")?.addEventListener("change", (e)=>{ currentConfig.doubleStrikeMode=(e.currentTarget as HTMLSelectElement).value as Mcr2026Config["doubleStrikeMode"]; recalc(); });
   document.getElementById("doubleStrikeScope")?.addEventListener("change", (e)=>{ currentConfig.doubleStrikeScope=(e.currentTarget as HTMLSelectElement).value as Mcr2026Config["doubleStrikeScope"]; recalc(); });
@@ -1185,8 +1249,9 @@ function renderShell(): void {
     }
     else if(activeLabMethod === "rr") { rrConfig=defaultRrConfig(); rrPlayerBands=RR_DEFAULT_PLAYER_BANDS.map((x)=>({...x})); rrSessionBands=RR_DEFAULT_SESSION_BANDS.map((x)=>({...x})); rrTypeMultipliers={...RR_DEFAULT_TYPE_MULTIPLIERS}; rrSpecialCoefficients=RR_DEFAULT_SPECIAL_COEFFICIENTS.map((x)=>({...x})); }
     else if(activeLabMethod === "trueskill") trueSkillConfig=defaultTrueSkillTournamentConfig();
+    else if(activeLabMethod === "ass") assConfig=defaultAssConfig();
     else eloPlConfig=defaultEloPlConfig();
-    activeFormulaToken=null; activeRrFormulaToken=null; activeTrueSkillFormulaToken=null; activeEloPlFormulaToken=null; renderShell(); recalc();
+    activeFormulaToken=null; activeRrFormulaToken=null; activeTrueSkillFormulaToken=null; activeEloPlFormulaToken=null; activeAssFormulaToken=null; renderShell(); recalc();
   });
 
   document.getElementById("savePreset")?.addEventListener("click", ()=>{
@@ -1217,12 +1282,14 @@ function getActiveFormulaToken(): string | null {
   if (isMcrLabMethod(activeLabMethod)) return activeFormulaToken;
   if (activeLabMethod === "rr") return activeRrFormulaToken;
   if (activeLabMethod === "trueskill") return activeTrueSkillFormulaToken;
+  if (activeLabMethod === "ass") return activeAssFormulaToken;
   return activeEloPlFormulaToken;
 }
 function setActiveFormulaToken(token: string | null): void {
   if (isMcrLabMethod(activeLabMethod)) activeFormulaToken=token;
   else if (activeLabMethod === "rr") activeRrFormulaToken=token;
   else if (activeLabMethod === "trueskill") activeTrueSkillFormulaToken=token;
+  else if (activeLabMethod === "ass") activeAssFormulaToken=token;
   else activeEloPlFormulaToken=token;
 }
 function bindFormulaTokens(): void {
@@ -1448,6 +1515,16 @@ function renderFormulaInspector(): void {
     panel.classList.add("open"); bindEloControls(panel); return;
   }
 
+  if (activeLabMethod === "ass") {
+    if (!activeAssFormulaToken) { panel.innerHTML=""; panel.classList.remove("open"); return; }
+    const token=activeAssFormulaToken;
+    const keyMap: Record<string, AssNumericKey[]> = {
+      assStrengthWeight:["strengthWeight"], assAchievementWeight:["achievementWeight"], assStart:["plStartRating"], assMu:["plK","plScale"], assK:["conservativeK"], assSigma:["initialSigma","confidencePlayersCoef","confidenceSessionsCoef"], assInitialSigma:["initialSigma"], assInformation:["confidencePlayersCoef","confidenceSessionsCoef"], assDisplayScale:["displayScale"], assAlpha:["achievementAlpha"], assHalfLife:["achievementHalfLifeMonths"], assPrior:["achievementPrior"], assPriorWeight:["achievementPriorWeight"], assFieldCoef:["fieldStrengthCoef"], assFieldMin:["fieldStrengthMin"], assFieldMax:["fieldStrengthMax"], assField:["fieldStrengthCoef","fieldStrengthMin","fieldStrengthMax"], assUnknown:["plStartRating"], assDecay:["achievementHalfLifeMonths"]
+    };
+    const controls=(keyMap[token]??[]).map((key)=>assControlHtml(ASS_CONTROL_DEFS.find(x=>x.key===key)!)).join("");
+    panel.innerHTML=`<div class="inspector-copy"><strong>ASS / ${esc(token)}</strong><span>Экспериментальная настройка Arslan's Simplified Scoring. Формула и параметры показаны непосредственно над панелью.</span></div>${controls?`<div class="inspector-controls">${controls}</div>`:""}`;
+    panel.classList.add("open"); bindAssControls(panel); return;
+  }
   if (activeLabMethod === "rr") {
     if (!activeRrFormulaToken) { panel.innerHTML=""; panel.classList.remove("open"); return; }
     const item = RR_TOKEN_HELP[activeRrFormulaToken];
@@ -1904,9 +1981,9 @@ function exportRrRankingCsv(): void {
   const blob=new Blob(["\\uFEFF"+lines.join("\\n")],{type:"text/csv;charset=utf-8"}); const url=URL.createObjectURL(blob); const a=document.createElement("a");a.href=url;a.download="rr_ranking.csv";a.click();URL.revokeObjectURL(url);
 }
 
-function renderAlternativeLabOutput(kind:"trueskill"|"elo-pl"): void {
-  const cur=kind==="trueskill"?trueSkillCurrent:eloPlCurrent;
-  const ref=kind==="trueskill"?trueSkillReference:eloPlReference;
+function renderAlternativeLabOutput(kind:"trueskill"|"elo-pl"|"ass"): void {
+  const cur=kind==="trueskill"?trueSkillCurrent:kind==="ass"?assCurrent:eloPlCurrent;
+  const ref=kind==="trueskill"?trueSkillReference:kind==="ass"?assReference:eloPlReference;
   const ranking=document.querySelector<HTMLElement>("#ranking"); const metrics=document.querySelector<HTMLElement>("#metrics"); const leaders=document.querySelector<HTMLElement>("#deltaLeaders"); if(!ranking||!metrics||!leaders)return;
   if(!cur||!ref){ranking.innerHTML=`<div class="notice error">${esc(labMethodName(kind))} не удалось рассчитать.</div>`;return;}
   const refMap=new Map(ref.ranking.map((x:any)=>[x.playerId,x]));
@@ -1917,15 +1994,18 @@ function renderAlternativeLabOutput(kind:"trueskill"|"elo-pl"): void {
   leaders.innerHTML=diagnosticSummaryHtml(`${labMethodName(kind)} / текущая конфигурация`,cur,kind);
   const count=document.getElementById("rankingVisibleCount"); if(count)count.textContent=`${rows.length} игроков`;
   if(kind==="trueskill") ranking.innerHTML=`<div class="table-wrap ranking-wrap"><table class="ranking-table"><thead><tr><th>#</th><th>Игрок</th><th>μ−kσ</th><th>μ</th><th>σ</th><th>Турниров</th><th>Default</th><th>Δ rating</th><th>Δ место</th></tr></thead><tbody>${rows.map((x:any)=>`<tr><td>${x.rank}</td><td>${esc(x.playerName)}</td><td class="emph">${fmt(x.rating)}</td><td>${fmt(x.mu,3)}</td><td>${fmt(x.sigma,3)}</td><td>${x.tournamentsCount}</td><td>${x.refRating===null?"—":fmt(x.refRating)}</td><td>${x.deltaRating===null?"—":`${x.deltaRating>=0?"+":""}${fmt(x.deltaRating)}`}</td><td>${x.deltaRank===null?"—":`${x.deltaRank>=0?"+":""}${x.deltaRank}`}</td></tr>`).join("")}</tbody></table></div>`;
+  else if(kind==="ass") ranking.innerHTML=`<div class="table-wrap ranking-wrap"><table class="ranking-table"><thead><tr><th>#</th><th>Игрок</th><th>ASS</th><th>Strength S</th><th>Achievement A</th><th>μ</th><th>σ</th><th>Турниров</th><th>Default</th><th>Δ rating</th><th>Δ место</th></tr></thead><tbody>${rows.map((x:any)=>`<tr><td>${x.rank}</td><td>${esc(x.playerName)}</td><td class="emph">${fmt(x.rating)}</td><td>${fmt(x.strengthScore)}</td><td>${fmt(x.achievementScore)}</td><td>${fmt(x.mu,2)}</td><td>${fmt(x.sigma,2)}</td><td>${x.tournamentsCount}</td><td>${x.refRating===null?"—":fmt(x.refRating)}</td><td>${x.deltaRating===null?"—":`${x.deltaRating>=0?"+":""}${fmt(x.deltaRating)}`}</td><td>${x.deltaRank===null?"—":`${x.deltaRank>=0?"+":""}${x.deltaRank}`}</td></tr>`).join("")}</tbody></table></div>`;
   else ranking.innerHTML=`<div class="table-wrap ranking-wrap"><table class="ranking-table"><thead><tr><th>#</th><th>Игрок</th><th>Display rating</th><th>Raw rating</th><th>Турниров</th><th>Default</th><th>Δ rating</th><th>Δ место</th></tr></thead><tbody>${rows.map((x:any)=>`<tr><td>${x.rank}</td><td>${esc(x.playerName)}</td><td class="emph">${fmt(x.rating)}</td><td>${fmt(x.rawRating)}</td><td>${x.tournamentsCount}</td><td>${x.refRating===null?"—":fmt(x.refRating)}</td><td>${x.deltaRating===null?"—":`${x.deltaRating>=0?"+":""}${fmt(x.deltaRating)}`}</td><td>${x.deltaRank===null?"—":`${x.deltaRank>=0?"+":""}${x.deltaRank}`}</td></tr>`).join("")}</tbody></table></div>`;
 }
 function exportTrueSkillCsv():void{if(!trueSkillCurrent)return;const lines=["rank,player_id,player_name,rating,mu,sigma,tournaments",...trueSkillCurrent.ranking.map(x=>[x.rank,x.playerId,csvCell(x.playerName),x.rating,x.mu,x.sigma,x.tournamentsCount].join(","))];downloadTextFile("trueskill-tournament-ranking.csv",lines.join("\r\n"));}
 function exportEloPlCsv():void{if(!eloPlCurrent)return;const lines=["rank,player_id,player_name,display_rating,raw_rating,tournaments",...eloPlCurrent.ranking.map(x=>[x.rank,x.playerId,csvCell(x.playerName),x.rating,x.rawRating,x.tournamentsCount].join(","))];downloadTextFile("elo-pl-ranking.csv",lines.join("\r\n"));}
+function exportAssCsv():void{if(!assCurrent)return;const lines=["rank,player_id,player_name,ass_rating,strength_score,achievement_score,mu,sigma,information,effective_achievement_weight,tournaments",...assCurrent.ranking.map(x=>[x.rank,x.playerId,csvCell(x.playerName),x.rating,x.strengthScore,x.achievementScore,x.mu,x.sigma,x.information,x.effectiveAchievementWeight,x.tournamentsCount].join(","))];downloadTextFile("ass-ranking.csv",lines.join("\r\n"));}
 
 function renderOutput(): void {
   if (activeLabMethod === "rr") { renderRrLabOutput(); return; }
   if (activeLabMethod === "trueskill") { renderAlternativeLabOutput("trueskill"); return; }
   if (activeLabMethod === "elo-pl") { renderAlternativeLabOutput("elo-pl"); return; }
+  if (activeLabMethod === "ass") { renderAlternativeLabOutput("ass"); return; }
   if (!current || !activeMcrReference()) {
     const ranking=document.querySelector<HTMLElement>("#ranking"); if(ranking) ranking.innerHTML=`<div class="notice error">MCR не удалось рассчитать для текущего набора/конфигурации.</div>`; return;
   }
@@ -2073,6 +2153,7 @@ function historyMethodOptions(): Array<{ id: string; label: string; method: LabM
     { id: "rr-default", label: "RR default", method: "rr" },
     { id: "trueskill-default", label: "TrueSkill Tournament default", method: "trueskill" },
     { id: "elo-pl-default", label: "Elo-PL default", method: "elo-pl" },
+    { id: "ass-default", label: "ASS default", method: "ass" },
   ];
   return [...base, ...loadPresets().map((preset) => ({
     id: `preset:${preset.id}`,
@@ -2156,6 +2237,9 @@ async function buildHistoryForMethodAsync(methodId: string): Promise<UnifiedHist
   } else if (option.method === "trueskill") {
     const config={...defaultTrueSkillTournamentConfig(),...(option.preset?.payload?.config ?? {})};
     job = { kind: "trueskill-history", config };
+  } else if (option.method === "ass") {
+    const config={...defaultAssConfig(),...(option.preset?.payload?.config ?? {})};
+    job = { kind: "ass-history", config };
   } else {
     const config={...defaultEloPlConfig(),...(option.preset?.payload?.config ?? {})};
     job = { kind: "elo-pl-history", config };
