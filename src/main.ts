@@ -1821,7 +1821,7 @@ function downloadTextFile(filename: string, text: string, mime = "text/csv;chars
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function exportRankingCsv(): void {
@@ -2233,7 +2233,7 @@ function exportPredictionBenchmarkCsv(): void {
   if (!benchmarkResult) return;
   const header = ["method_id","method","tournament_id","tournament_name","tournament_date","participants","rated_participants","total_pairs","predicted_pairs","correct_pairs","pairwise_accuracy","pair_coverage","spearman","latent_spearman"];
   const lines = [header.join(","), ...benchmarkResult.events.map((row) => [row.methodId,row.methodLabel,row.tournamentId,row.tournamentName,row.tournamentDate,row.participants,row.ratedParticipants,row.totalPairs,row.predictedPairs,row.correctPairs,row.pairwiseAccuracy ?? "",row.pairCoverage,row.spearman ?? "",row.latentSpearman ?? ""].map(csvCell).join(","))];
-  downloadTextFile("prediction-benchmark-events.csv", `\uFEFF${lines.join("\n")}`);
+  downloadTextFile("prediction-benchmark-events.csv", lines.join("\n"));
 }
 
 function historyOverrides(): TableOverrides {
