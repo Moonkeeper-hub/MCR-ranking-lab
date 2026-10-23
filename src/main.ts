@@ -25,6 +25,7 @@ import type {
 } from "./engine/types";
 import { loadCsvPair, playersFromCsv, resultsFromCsv } from "./data/csv";
 import { calculateRankingDistanceMetric, type RankingDistanceMetric } from "./analysis/rankingDistance";
+import { runPredictionBenchmark, type PredictionBenchmarkResult } from "./analysis/predictionBenchmark";
 import { LruCache, stableSerialize } from "./performanceCache";
 import { RatingWorkerPool } from "./workerPool";
 import { defaultTrueSkillTournamentConfig, type TrueSkillTournamentConfig, type TrueSkillTournamentResult } from "./engine/trueskillTournament";
@@ -141,6 +142,12 @@ let historyMethodB: HistoryMethodId = "rr-default";
 let historyPeriodStart = "";
 let historyPeriodEnd = "";
 let historySettingsOpen: "methods" | "period" | null = null;
+let benchmarkStartDate = "";
+let benchmarkEndDate = "";
+let benchmarkSelectedMethods = new Set<string>(["mcr-default", "mcr-observed-default", "rr-default", "trueskill-default", "elo-pl-default", "ass-default"]);
+let benchmarkResult: PredictionBenchmarkResult | null = null;
+let benchmarkRunning = false;
+let benchmarkError = "";
 let historySnapshots: UnifiedHistorySnapshot[] = [];
 let historyReferenceSnapshots: UnifiedHistorySnapshot[] = [];
 let historySnapshotIndex = 0;
@@ -201,6 +208,7 @@ function markDatasetChanged(): void {
   datasetRevision += 1;
   clearDatasetCaches();
   historyDirty = true;
+  benchmarkResult = null; benchmarkError = ""; benchmarkRunning = false;
   ratingWorkers.setDataset(players, results, datasetRevision);
 }
 
@@ -1137,7 +1145,7 @@ function renderShell(): void {
 
   app.innerHTML = `
     <div class="app">
-      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.31.5 · TypeScript · Project MCR + Legacy MCR observed + RR + TrueSkill Tournament + Elo-PL · 2 workers · расчёт выполняется в браузере</div></div>
+      <header class="topbar"><div><h1>MCR Rating Lab</h1><div class="subtitle">v0.31.8 · TypeScript · Project MCR + Legacy MCR observed + RR + TrueSkill Tournament + Elo-PL + ASS · Prediction Benchmark · 2 workers · расчёт выполняется в браузере</div></div>
         <div class="topbar-actions"><div class="privacy-pill">CSV остаются на устройстве пользователя</div>
         <div class="support-wrap"><button id="supportButton" class="support-button" type="button">Donate / Support</button>
         <div id="supportPopover" class="support-popover" hidden><strong>Поддержать проект</strong><span>Перевод по номеру телефона на Сбербанк</span><div class="support-number-row"><code>+7 967 087 1525</code><button id="copySupportNumber" type="button">Копировать</button></div><span id="supportCopyStatus" class="micro"></span></div></div></div>
@@ -1152,7 +1160,7 @@ function renderShell(): void {
       <section id="comparisonWorkspace" class="workspace-panel ${activeWorkspace === "comparison" ? "active" : ""} comparison-workspace">
         <main class="main comparison-main">
           <section class="results-card">
-            <div class="results-head"><div><div class="eyebrow">Сравнение методик</div><h2>Проектный MCR · Legacy MCR observed · RR · TrueSkill Tournament · Elo-PL</h2>
+            <div class="results-head"><div><div class="eyebrow">Сравнение методик</div><h2>Проектный MCR · Legacy MCR observed · RR · TrueSkill Tournament · Elo-PL · ASS</h2>
               <div class="reference-labels"><span>Один dataset</span><span>сравниваем позиции, а не абсолютные шкалы</span></div></div><div id="comparisonMetrics" class="metrics-strip"></div></div>
             <div class="comparison-toolbar"><label>Пользовательский пресет <select id="comparisonPresetSelect"><option value="">Без пользовательского пресета</option></select></label></div>
             <div id="comparisonRanking"></div>
@@ -1166,6 +1174,19 @@ function renderShell(): void {
             </div>
             <details class="distance-explainer"><summary>Как считается метрика</summary><div class="notice">Первая рейтинговая позиция игрока задаёт исходное достижение и сама в пары не входит. До первого выхода на #1 пара (число сыгранных турниров; место) создаётся только при строгом улучшении личного лучшего места. Считаются турниры игрока после предыдущего достижения, включая турнир нового рекорда. После первого #1 цель фиксируется на первом месте: считаются дистанции до каждого повторного #1. Если история заканчивается раньше следующего повторения, остаток турнирной дистанции фиксируется как незавершённое наблюдение #1. Если игрок ни разу не достиг #1, незавершённый отрезок без нового личного рекорда не добавляется. В графики входят достижения в пределах выбранного Top-N. Первая гистограмма для каждого места/диапазона суммирует tournament distance всех соответствующих пар и делит сумму на число турниров, учтённых этой рейтинговой методикой. Вторая гистограмма считает количество соответствующих пар и делит его на число игроков, присутствующих в рейтинге методики.</div></details>
             <div id="distanceMetricMethods" class="distance-methods"></div>
+          </section>
+
+          <section class="results-card benchmark-card">
+            <div class="results-head"><div><div class="eyebrow">Prediction benchmark</div><h2>Out-of-sample проверка предсказательной силы</h2>
+              <div class="formula-caption">Для каждого турнира используется только рейтинг, существовавший до него. Pairwise accuracy считается только по парам, для которых метод уже имел рейтинг; coverage показывает, какую долю поля метод вообще смог предсказать.</div></div></div>
+            <div class="benchmark-toolbar">
+              <label>С даты <input id="benchmarkStartDate" type="date" value="${benchmarkStartDate}"></label>
+              <label>По дату <input id="benchmarkEndDate" type="date" value="${benchmarkEndDate}"></label>
+              <button id="runPredictionBenchmark" class="primary" type="button">Запустить benchmark</button>
+              <button id="exportPredictionBenchmark" type="button" ${benchmarkResult ? "" : "disabled"}>↓ CSV событий</button>
+            </div>
+            <div id="benchmarkMethodPicker" class="benchmark-method-picker"></div>
+            <div id="predictionBenchmarkOutput"></div>
           </section>
 
           <section class="history-card history-embedded">
@@ -1266,9 +1287,14 @@ function renderShell(): void {
 
   document.getElementById("distanceTopN")?.addEventListener("change",(e)=>{distanceTopN=Math.max(1,Math.min(500,Math.floor(Number((e.currentTarget as HTMLInputElement).value)||100)));distanceMetricCache.clear();renderDistanceMetrics();});
   document.getElementById("distanceStep")?.addEventListener("input",(e)=>{distanceStep=Math.max(1,Math.min(10,Math.floor(Number((e.currentTarget as HTMLInputElement).value)||1)));const out=document.getElementById("distanceStepValue");if(out)out.textContent=String(distanceStep);distanceMetricCache.clear();renderDistanceMetrics();});
-  document.getElementById("historyInitialMode")?.addEventListener("change",(e)=>{historyInitialMode=(e.currentTarget as HTMLSelectElement).value as InitialStateMode;historyDirty=true;historySnapshotIndex=0;distanceMetricCache.clear();renderHistoryWorkspace();renderDistanceMetrics();});
+  document.getElementById("benchmarkStartDate")?.addEventListener("change",(e)=>{benchmarkStartDate=(e.currentTarget as HTMLInputElement).value; benchmarkResult=null; renderPredictionBenchmark();});
+  document.getElementById("benchmarkEndDate")?.addEventListener("change",(e)=>{benchmarkEndDate=(e.currentTarget as HTMLInputElement).value; benchmarkResult=null; renderPredictionBenchmark();});
+  document.getElementById("runPredictionBenchmark")?.addEventListener("click",()=>{ void runPredictionBenchmarkUi(); });
+  document.getElementById("exportPredictionBenchmark")?.addEventListener("click",exportPredictionBenchmarkCsv);
+  document.getElementById("historyInitialMode")?.addEventListener("change",(e)=>{historyInitialMode=(e.currentTarget as HTMLSelectElement).value as InitialStateMode;historyDirty=true;historySnapshotIndex=0;distanceMetricCache.clear();benchmarkResult=null;renderHistoryWorkspace();renderDistanceMetrics();renderPredictionBenchmark();});
   document.getElementById("historySlider")?.addEventListener("input",(e)=>{historySnapshotIndex=Number((e.currentTarget as HTMLInputElement).value);historyExpandedPlayerId=null;renderHistorySnapshot();});
   document.getElementById("historyPlayerSelect")?.addEventListener("change",(e)=>{historyPlayerId=(e.currentTarget as HTMLSelectElement).value||null;renderHistoryPlayerChart();});
+  renderPredictionBenchmark();
   if (activeWorkspace === "mock") {
     const mount = document.getElementById("mockWorkspaceMount");
     if (mount) renderMockWorkspace(mount, { useDataset: (mockPlayers, mockResults, label) => {
@@ -2137,6 +2163,77 @@ function setWorkspace(workspace: "comparison" | "lab" | "mock"): void {
       markDatasetChanged(); activeWorkspace = "comparison"; renderShell(); void recalc();
     }});
   }
+}
+
+function benchmarkPct(value: number | null, digits = 1): string {
+  return value === null || !Number.isFinite(value) ? "—" : `${(value * 100).toFixed(digits)}%`;
+}
+function benchmarkRho(value: number | null): string {
+  return value === null || !Number.isFinite(value) ? "—" : value.toFixed(3);
+}
+
+function benchmarkOptions() {
+  return historyMethodOptions();
+}
+
+function renderPredictionBenchmark(): void {
+  const picker = document.getElementById("benchmarkMethodPicker");
+  const output = document.getElementById("predictionBenchmarkOutput");
+  if (!picker || !output) return;
+  const options = benchmarkOptions();
+  const valid = new Set(options.map((x) => x.id));
+  benchmarkSelectedMethods = new Set([...benchmarkSelectedMethods].filter((id) => valid.has(id)));
+  if (!benchmarkSelectedMethods.size) benchmarkSelectedMethods.add("ass-default");
+  picker.innerHTML = options.map((option) => `<label class="benchmark-method-option"><input type="checkbox" data-benchmark-method="${esc(option.id)}" ${benchmarkSelectedMethods.has(option.id) ? "checked" : ""}><span>${esc(option.label)}</span></label>`).join("");
+  picker.querySelectorAll<HTMLInputElement>("[data-benchmark-method]").forEach((input) => input.addEventListener("change", () => {
+    const id = input.dataset.benchmarkMethod!;
+    if (input.checked) benchmarkSelectedMethods.add(id); else benchmarkSelectedMethods.delete(id);
+    benchmarkResult = null;
+    renderPredictionBenchmark();
+  }));
+
+  if (benchmarkRunning) {
+    output.innerHTML = `<div class="notice">Считаю исторические snapshots выбранных методов…</div>`;
+    return;
+  }
+  if (benchmarkError) {
+    output.innerHTML = `<div class="notice error">${esc(benchmarkError)}</div>`;
+    return;
+  }
+  if (!benchmarkResult) {
+    const hasTruth = results.some((row) => Number.isFinite(Number(row.latent_elo_at_event)));
+    output.innerHTML = `<div class="notice">Выберите методики и период. ${hasTruth ? "В dataset найден <code>latent_elo_at_event</code>: benchmark дополнительно посчитает корреляцию с истинной силой." : "Latent truth не найден: будут рассчитаны только прогнозные метрики по фактическим местам."}</div>`;
+    return;
+  }
+
+  const sorted = [...benchmarkResult.methods].sort((a,b) => (b.pairwiseAccuracy ?? -1) - (a.pairwiseAccuracy ?? -1));
+  output.innerHTML = `<div class="table-wrap"><table class="ranking-table benchmark-table"><thead><tr>
+    <th>Метод</th><th>Событий</th><th>Pairwise accuracy</th><th>Pair coverage</th><th>Player coverage</th><th>Mean Spearman</th>${benchmarkResult.hasLatentTruth ? "<th>Latent ρ</th>" : ""}
+  </tr></thead><tbody>${sorted.map((row) => `<tr><td><strong>${esc(row.methodLabel)}</strong></td><td>${row.eventsScored}</td><td>${benchmarkPct(row.pairwiseAccuracy)}</td><td>${benchmarkPct(row.pairCoverage)}</td><td>${benchmarkPct(row.playerCoverage)}</td><td>${benchmarkRho(row.meanSpearman)}</td>${benchmarkResult!.hasLatentTruth ? `<td>${benchmarkRho(row.meanLatentSpearman)}</td>` : ""}</tr>`).join("")}</tbody></table></div>
+  <div class="micro benchmark-note">Accuracy агрегируется по всем предсказанным парам; Spearman и latent ρ — среднее по турнирам. Tied ratings не считаются предсказанием. Первый турнир до появления истории обычно имеет нулевое покрытие.</div>`;
+}
+
+async function runPredictionBenchmarkUi(): Promise<void> {
+  if (benchmarkRunning) return;
+  const selected = [...benchmarkSelectedMethods];
+  if (!selected.length) { benchmarkError = "Выберите хотя бы одну методику."; renderPredictionBenchmark(); return; }
+  benchmarkRunning = true; benchmarkError = ""; benchmarkResult = null; renderPredictionBenchmark();
+  try {
+    const histories = await Promise.all(selected.map(async (id) => ({ id, history: await buildHistoryForMethodAsync(id) })));
+    benchmarkResult = runPredictionBenchmark(histories.map(({id,history}) => ({ id, label: historyMethodLabel(id), history })), results, { startDate: benchmarkStartDate, endDate: benchmarkEndDate });
+  } catch (error) {
+    benchmarkError = error instanceof Error ? error.message : String(error);
+  } finally {
+    benchmarkRunning = false;
+    renderPredictionBenchmark();
+  }
+}
+
+function exportPredictionBenchmarkCsv(): void {
+  if (!benchmarkResult) return;
+  const header = ["method_id","method","tournament_id","tournament_name","tournament_date","participants","rated_participants","total_pairs","predicted_pairs","correct_pairs","pairwise_accuracy","pair_coverage","spearman","latent_spearman"];
+  const lines = [header.join(","), ...benchmarkResult.events.map((row) => [row.methodId,row.methodLabel,row.tournamentId,row.tournamentName,row.tournamentDate,row.participants,row.ratedParticipants,row.totalPairs,row.predictedPairs,row.correctPairs,row.pairwiseAccuracy ?? "",row.pairCoverage,row.spearman ?? "",row.latentSpearman ?? ""].map(csvCell).join(","))];
+  downloadTextFile("prediction-benchmark-events.csv", `\uFEFF${lines.join("\n")}`);
 }
 
 function historyOverrides(): TableOverrides {
