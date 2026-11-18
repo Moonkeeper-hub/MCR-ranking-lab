@@ -77,9 +77,8 @@ export class EvolutionEngine {
   }
 
   /**
-   * Appendix 3 inactivity rule.
-   * Call this only for players who do NOT participate in the tournament
-   * currently being processed.
+   * Apply due inactivity periods before an event. Appendix 2 calls this for
+   * every player; the Appendix 3 profile calls it for non-participants only.
    *
    * danDate remains the last tournament where EU_before <= NR * KT was met.
    * expiryPeriodsApplied prevents the same anniversary from being charged
@@ -120,11 +119,9 @@ export class EvolutionEngine {
    * is the nearest value not exceeding NR*KT.
    *
    * For 1 dan and above, floor((NR*KT - EU_before) / 500) pluses are earned.
-   * Literal Appendix 3 keeps arithmetic cancellation of plus/minus marks.
-   * Legacy observed differs in two places below: successful dan confirmation
-   * clears an existing minus before new pluses are applied; a kyu crossing
-   * into dan first establishes D1/EU 2000 and converts only the residual
-   * performance above 2000 into 500-point pluses.
+   * Both profiles keep arithmetic cancellation of plus/minus marks.
+   * Appendix 2 first establishes D1/EU 2000 for a kyu player crossing into dan,
+   * then converts the residual performance above 2000 into 500-point pluses.
    */
   processPerformance(
     state: EvolutionState,
@@ -141,8 +138,8 @@ export class EvolutionEngine {
     }
 
     if (before.eu <= 1750) {
-      if (this.config.evolutionPolicy === "novikov_observed" && performance >= 2000) {
-        // Observed Novikov behaviour: a kyu player first reaches D1/EU 2000.
+      if (this.config.evolutionPolicy === "appendix2_v08" && performance >= 2000) {
+        // Appendix 2 v0.8: a kyu player first reaches D1/EU 2000.
         // Full 500-point excess above 2000 is then converted into pluses.
         state.eu = 2000;
         state.marks = 0;
@@ -174,12 +171,6 @@ export class EvolutionEngine {
       0,
       Math.floor((performance - before.eu) / this.config.danStep),
     );
-
-    if (this.config.evolutionPolicy === "novikov_observed" && state.marks < 0) {
-      // Observed Novikov behaviour: successful confirmation clears an existing
-      // inactivity minus first; newly earned pluses are applied afterwards.
-      state.marks = 0;
-    }
 
     this.addSuccesses(state, successCount);
 

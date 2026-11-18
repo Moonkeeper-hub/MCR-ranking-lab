@@ -8,6 +8,8 @@ export interface PlayerInput {
    * EU_before <= NR * KT was satisfied.
    */
   initial_dan_date?: string;
+  /** Inactivity anniversaries already charged since initial_dan_date (MCR described). */
+  initial_expiry_periods_applied?: number;
   /** Include player in the displayed/internal rating table. Defaults to true. */
   include_in_rating?: boolean;
   [key: string]: string | number | boolean | undefined;
@@ -44,7 +46,7 @@ export interface EvolutionState {
 export type DoubleStrikeMode = "none" | "A" | "B";
 export type DoubleStrikeScope = "every_tournament" | "newcomers_only";
 export type SubstituteEuPolicy = "zero" | "average" | "newcomer";
-export type EvolutionPolicy = "appendix3" | "novikov_observed";
+export type EvolutionPolicy = "appendix3" | "appendix2_v08";
 export type McrParticipantCountPolicy = "strict" | "lower" | "nearest" | "interpolate" | "skip";
 
 export interface Mcr2026Config {
@@ -62,7 +64,7 @@ export interface Mcr2026Config {
   doubleStrikeMode: DoubleStrikeMode;
   doubleStrikeScope: DoubleStrikeScope;
   substituteEuPolicy: SubstituteEuPolicy;
-  /** Rank-evolution semantics: literal Appendix 3 or reverse-engineered Novikov behaviour. */
+  /** Literal Appendix 3 or Appendix 2 v0.8 with the 2026-11-17 clarification. */
   evolutionPolicy: EvolutionPolicy;
   successesPerStep: number;
   failuresPerStep: number;

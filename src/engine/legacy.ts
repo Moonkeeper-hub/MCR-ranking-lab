@@ -37,18 +37,17 @@ export function defaultMcr2026Config(): Mcr2026Config {
 
 
 /**
- * Legacy MCR (Novikov observed).
- *
- * Reverse-engineered defaults from published before/after rating snapshots.
- * This is deliberately separate from the literal Appendix 3 implementation.
+ * MCR описанный — Appendix 2 v0.8 and Vitaly's clarification of 2026-11-17.
+ * Both tournament coefficients use all participants; the final evolution
+ * starts from the original, expiry-adjusted states, never the provisional ones.
  */
-export function defaultObservedMcrConfig(): Mcr2026Config {
+export function defaultDescribedMcrConfig(): Mcr2026Config {
   return {
     ...MCR2026_DEFAULTS,
     doubleStrikeMode: "A",
-    doubleStrikeScope: "newcomers_only",
+    doubleStrikeScope: "every_tournament",
     substituteEuPolicy: "zero",
-    evolutionPolicy: "novikov_observed",
+    evolutionPolicy: "appendix2_v08",
     capKyuPromotionAtFirstDan: false,
   };
 }
@@ -194,7 +193,9 @@ export class Mcr2026Engine {
         nonSubRows.reduce((sum, row) => sum + euFor(row), 0) / nonSubRows.length;
     }
 
-    const values = rows.map((row) => {
+    // Appendix 2 explicitly excludes substitutes from both the sum and count.
+    const fieldRows = this.config.evolutionPolicy === "appendix2_v08" ? nonSubRows : rows;
+    const values = fieldRows.map((row) => {
       if (row.is_substitute && this.config.substituteEuPolicy === "average") {
         return substituteAverage;
       }
@@ -341,9 +342,11 @@ export class Mcr2026Engine {
         eu: Math.trunc(Number(p.initial_eu || 0)),
         marks,
         danDate: p.initial_dan_date ? parseDate(p.initial_dan_date) : null,
-        // In MCR-2026 minuses come from inactivity, so an imported minus
-        // represents one already-applied inactivity period.
-        expiryPeriodsApplied: marks < 0 ? 1 : 0,
+        // A minus can survive a successful confirmation without a new plus.
+        // It does not identify an anniversary already charged since that date.
+        expiryPeriodsApplied: this.config.evolutionPolicy === "appendix2_v08"
+          ? Math.max(0, Math.trunc(Number(p.initial_expiry_periods_applied ?? 0)))
+          : (marks < 0 ? 1 : 0),
       });
       names.set(p.player_id, p.player_name);
       includeInRanking.set(p.player_id, p.include_in_rating !== false);
@@ -401,10 +404,11 @@ export class Mcr2026Engine {
 
       const participantIds = new Set(sub.map((row) => row.player_id));
 
-      // Appendix 3: inactivity is checked only for rated players who are NOT
-      // participating in the tournament currently being processed.
+      // Appendix 2 / Vitaly: prepare EU0 after expiry for everyone, including
+      // returning participants, before deriving either tournament coefficient.
+      // Preserve the separate Appendix 3 profile's non-participant-only rule.
       for (const [pid, state] of states.entries()) {
-        if (!participantIds.has(pid)) {
+        if (this.config.evolutionPolicy === "appendix2_v08" || !participantIds.has(pid)) {
           this.evolution.applyInactivity(state, tdate);
         }
       }
@@ -459,17 +463,10 @@ export class Mcr2026Engine {
         this.applyTournamentPass(sub, states, kt1.kt, tdate);
         this.enforceKyuPromotionCap(states, euBefore, participantIds, tdate);
       } else if (this.config.doubleStrikeMode === "A") {
-        // Fixed DS-A. The pre-tournament state of every already-known player
-        // remains frozen while KT1 is used to seed ONLY the Double Strike
-        // players. With the Legacy observed default scope this set contains
-        // true newcomers only: players with no known state/history before the
-        // current tournament. Their discrete EU levels obtained from KT1 are
-        // substituted into the field solely to recalculate KT2.
-        //
-        // The final pass then starts again from the original pre-tournament
-        // states and applies KT2 exactly once to ALL participants. Existing
-        // players therefore never receive a provisional EU increase while KT
-        // is being derived.
+        // KT1 -> provisional EU1 -> KT2. Under Appendix 2 defaults this covers
+        // ALL participants, including known players. EU1 is discarded after
+        // deriving KT2; the final update starts from the original EU0/marks.
+        // The newcomers_only scope remains a laboratory experiment.
         const provisionalStates = cloneStates(states);
         this.applyTournamentPass(
           sub,
@@ -560,8 +557,8 @@ export class Mcr2026Engine {
       for (const pid of participantIds) knownPlayers.add(pid);
     }
 
-    // Deliberately no calendar-only expiry here. Appendix 3 applies the
-    // inactivity check while processing a subsequent tournament.
+    // Rating/rank changes occur at tournament events, not at an arbitrary
+    // evaluation date. The evaluation date still controls T5 ageing.
 
     const ranking: RankingRow[] = [];
     for (const [pid, state] of states.entries()) {

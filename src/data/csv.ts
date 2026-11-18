@@ -44,6 +44,7 @@ export function playersFromCsv(text: string): PlayerInput[] {
     initial_eu: Number(r.initial_eu || r.current_eu || 0),
     initial_marks: Number(r.initial_marks || 0),
     initial_dan_date: r.initial_dan_date || r.last_norm_date || "",
+    initial_expiry_periods_applied: Number(r.initial_expiry_periods_applied || 0),
     include_in_rating: ("include_in_rating" in r)
       ? asBool(r.include_in_rating)
       : (("display_in_rating" in r) ? asBool(r.display_in_rating) : true),

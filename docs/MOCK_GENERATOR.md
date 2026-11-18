@@ -116,7 +116,7 @@ active_to
 ```text
 Neutral mock rating
 Project MCR
-Legacy MCR observed
+MCR описанный
 RR
 TrueSkill Tournament
 Elo-PL

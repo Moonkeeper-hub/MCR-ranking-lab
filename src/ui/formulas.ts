@@ -28,6 +28,11 @@ export function renderMcr2026Math(config: Mcr2026Config): string {
   const euNorm = String(Math.round(config.euNormalizer));
   const euRound = n(config.euRoundStep);
   const world = n(config.statusTournamentBonus);
+  const described = config.evolutionPolicy === "appendix2_v08";
+  const euRaw = String.raw`\frac{\overline{${hotspot("EU", "EUbar")}}}{${hotspot(euNorm, "euNormalizer")}}\cdot ${hotspot(n(config.euComponentScale), "euComponentScale")}`;
+  const euComponent = config.euRoundStep > 0
+    ? String.raw`\left\lfloor\frac{${euRaw}}{${hotspot(euRound, "euRoundStep")}}\right\rfloor\cdot ${hotspot(euRound, "euRoundStep")}`
+    : euRaw;
 
   const rating = render(String.raw`
     \mathrm{Rating}
@@ -67,22 +72,16 @@ export function renderMcr2026Math(config: Mcr2026Config): string {
     =
     ${hotspot("S_i", "KT_S")}\cdot ${hotspot(session, "sessionCoef")}
     +
-    ${hotspot("KT_{\mathrm{ЧУТ}}(N_i)", "KT_N")}
+    ${hotspot(n(config.playerCountScale), "KT_N")}\cdot ${hotspot(String.raw`KT_{\mathrm{ЧУТ}}(N_i)`, "KT_N")}
     +
-    \left\lfloor
-      \frac{
-        \left(\overline{${hotspot("EU", "EUbar")}}/${hotspot(euNorm, "euNormalizer")}\right)
-        \cdot ${hotspot(n(config.euComponentScale), "euComponentScale")}
-      }{
-        ${hotspot(euRound, "euRoundStep")}
-      }
-    \right\rfloor
-    \cdot ${hotspot(euRound, "euRoundStep")}
+    ${euComponent}
     +
     ${hotspot(world, "KT_W")}\cdot B_i
   `);
 
-  const norm = render(String.raw`
+  const norm = described
+    ? render(String.raw`P_i=${hotspot("NR_i", "NR")}\cdot${hotspot("KT_i", "KT")},\quad EU_0\ge2000,\ P_i\ge EU_0\quad\Longrightarrow\quad ${hotspot(String.raw`\text{плюсы}`, "marks")}=\left\lfloor\frac{P_i-EU_0}{${hotspot(String(config.danStep), "EU")}}\right\rfloor`)
+    : render(String.raw`
     ${hotspot("NR_i", "NR")}
     \cdot
     ${hotspot("KT_i", "KT")}
@@ -93,6 +92,10 @@ export function renderMcr2026Math(config: Mcr2026Config): string {
     \quad\cdot\quad
     ${hotspot("\\mathrm{Double\\ Strike}", "DoubleStrike")}
   `);
+  const doubleStrike = described ? render(config.doubleStrikeMode === "none"
+    ? String.raw`${hotspot("EU_0", "EU")}=\mathrm{Expiry}(EU_{before},t),\quad KT_1=KT(EU_0),\quad ${hotspot("EU_{final}", "DoubleStrike")}=\mathrm{Evolve}(EU_0,KT_1)`
+    : String.raw`${hotspot("EU_0", "EU")}=\mathrm{Expiry}(EU_{before},t),\quad KT_1=KT(EU_0),\quad EU_1=\mathrm{Evolve}(EU_0,KT_1),\quad KT_2=KT(EU_1),\quad ${hotspot("EU_{final}", "DoubleStrike")}=\mathrm{Evolve}(${config.doubleStrikeMode === "A" ? "EU_0" : "EU_1"},KT_2)`)
+    : "";
 
   return `
     <div class="math-formula-stack">
@@ -101,6 +104,7 @@ export function renderMcr2026Math(config: Mcr2026Config): string {
       <div class="math-line math-line-secondary">${nr}</div>
       <div class="math-line">${kt}</div>
       <div class="math-line math-line-secondary">${norm}</div>
+      ${described ? `<div class="math-line math-line-secondary">${doubleStrike}</div><p class="micro">Средний EU состава исключает игроков замены. Expiry проверяет всех игроков до расчёта КТ; Evolve учитывает EU и отметки. В режиме A с областью «только новички» промежуточный EU₁ изменяется только для них. Кю при P ≥ 2000 получает D1 и floor((P−2000)/шага) плюсов; два плюса повышают дан по default-настройкам. Подтверждение само по себе не снимает минус. Нормативный default: A, каждый турнир.</p>` : ""}
     </div>
   `;
 }
