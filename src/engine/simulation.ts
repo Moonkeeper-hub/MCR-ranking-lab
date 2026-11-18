@@ -55,6 +55,7 @@ function playersForMode(players: PlayerInput[], mode: InitialStateMode): PlayerI
     initial_eu: 0,
     initial_marks: 0,
     initial_dan_date: "",
+    initial_expiry_periods_applied: 0,
   }));
 }
 

@@ -1,6 +1,6 @@
 # ASS — Arslan's Simplified Scoring
 
-Experimental MCR rating method for the laboratory. The name is intentionally unserious; the implementation is deterministic and intended for comparison with Legacy MCR, Project MCR, RR, TrueSkill Tournament and Elo-PL.
+Experimental MCR rating method for the laboratory. The name is intentionally unserious; the implementation is deterministic and intended for comparison with MCR описанный, Project MCR, RR, TrueSkill Tournament and Elo-PL.
 
 ## Core idea
 
